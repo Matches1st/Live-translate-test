@@ -3,38 +3,34 @@
 const OFFSCREEN_PATH = 'offscreen.html';
 let capturingTabId = null;
 
-// 1. Handle Extension Icon Click (Toggle)
+// 1. Handle Extension Icon Click
 chrome.action.onClicked.addListener(async (tab) => {
-  if (capturingTabId === tab.id) {
-    // If already capturing this tab, stop it
+  // If we are capturing a different tab, stop it first
+  if (capturingTabId && capturingTabId !== tab.id) {
     await stopCapture();
-  } else {
-    // If capturing another tab, stop that first
-    if (capturingTabId) {
-      await stopCapture();
-    }
-    // Start/Show UI on new tab
-    await injectAndShowUI(tab.id);
   }
-});
 
-async function injectAndShowUI(tabId) {
+  // Inject UI if needed
   try {
-    // Ensure content script is ready
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId: tab.id },
       files: ['content.js']
     });
-    // Send toggle command
-    chrome.tabs.sendMessage(tabId, { action: 'TOGGLE_UI' }).catch(() => {});
-  } catch (err) {
-    console.error("Injection failed:", err);
+  } catch (e) {
+    console.log("Script already injected or cannot inject");
   }
-}
+
+  // Send Toggle Command
+  chrome.tabs.sendMessage(tab.id, { action: 'TOGGLE_UI' }).catch((err) => {
+    console.error("Could not send message to tab:", err);
+  });
+});
 
 // 2. Offscreen Document Management
 async function ensureOffscreen() {
   const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_PATH);
+  
+  // Check existence using full URL
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT'],
     documentUrls: [offscreenUrl]
@@ -42,6 +38,7 @@ async function ensureOffscreen() {
 
   if (existingContexts.length > 0) return;
 
+  // Create if missing
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_PATH,
     reasons: ['AUDIO_PLAYBACK'],
@@ -50,7 +47,7 @@ async function ensureOffscreen() {
 }
 
 async function closeOffscreen() {
-  await chrome.offscreen.closeDocument().catch(() => {}); // Ignore if not exists
+  await chrome.offscreen.closeDocument().catch(() => {});
 }
 
 // 3. Message Routing
@@ -60,8 +57,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   } else if (msg.action === 'REQUEST_STOP_CAPTURE') {
     stopCapture();
   } else if (msg.action === 'UPDATE_CONFIG') {
+    // Forward config update to offscreen
     chrome.runtime.sendMessage({ action: 'UPDATE_CONFIG', config: msg.config }).catch(() => {});
   } else if (msg.action === 'TRANSCRIPT_RECEIVED') {
+    // Forward transcript to the active capturing tab
     if (capturingTabId) {
       chrome.tabs.sendMessage(capturingTabId, { action: 'TRANSCRIPT_UPDATE', text: msg.text }).catch(() => {});
     }
@@ -69,19 +68,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (capturingTabId) {
       chrome.tabs.sendMessage(capturingTabId, { action: 'ERROR', error: msg.error }).catch(() => {});
     }
-    stopCapture();
   } else if (msg.action === 'DOWNLOAD_PDF') {
-    injectPdfGenerator(sender.tab.id, msg.text);
+    if (sender.tab) injectPdfGenerator(sender.tab.id, msg.text);
   }
 });
 
 // 4. Capture Logic
 async function handleStartCapture(tabId, config) {
   try {
+    capturingTabId = tabId;
     await ensureOffscreen();
     
+    // Get Stream ID (must be done in background)
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-    capturingTabId = tabId;
 
     // Initialize Recorder in Offscreen
     chrome.runtime.sendMessage({
@@ -95,7 +94,7 @@ async function handleStartCapture(tabId, config) {
 
   } catch (err) {
     console.error("Capture failed:", err);
-    chrome.tabs.sendMessage(tabId, { action: 'ERROR', error: "Could not access tab audio. " + err.message });
+    chrome.tabs.sendMessage(tabId, { action: 'ERROR', error: "Capture failed: " + err.message });
     closeOffscreen();
     capturingTabId = null;
   }
@@ -113,11 +112,11 @@ async function stopCapture() {
   // Cleanup
   capturingTabId = null;
   
-  // Close offscreen after short delay to allow final processing
-  setTimeout(() => closeOffscreen(), 1000);
+  // Wait a bit before killing offscreen to allow last chunk processing
+  setTimeout(() => closeOffscreen(), 2000);
 }
 
-// 5. PDF Generator Injection
+// 5. PDF Generator Injection (Main World for CDN access)
 function injectPdfGenerator(tabId, fullText) {
   chrome.scripting.executeScript({
     target: { tabId },
@@ -126,25 +125,30 @@ function injectPdfGenerator(tabId, fullText) {
       try {
         const { jsPDF } = await import('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
         const doc = new jsPDF();
-        const margin = 15;
-        const width = doc.internal.pageSize.getWidth() - (margin * 2);
         
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const margin = 15;
+        const maxLineWidth = pageWidth - (margin * 2);
+
         doc.setFontSize(18);
         doc.text("Gemini Transcript", margin, 20);
         doc.setFontSize(12);
-        
-        const lines = doc.splitTextToSize(text, width);
+
+        const lines = doc.splitTextToSize(text, maxLineWidth);
         let y = 35;
-        
+
         lines.forEach(line => {
-          if (y > 280) { doc.addPage(); y = 20; }
+          if (y > 280) {
+            doc.addPage();
+            y = 20;
+          }
           doc.text(line, margin, y);
           y += 7;
         });
-        
+
         doc.save(`transcript_${new Date().toISOString().slice(0,16)}.pdf`);
       } catch (e) {
-        alert("PDF Error: " + e.message);
+        alert("PDF Generation Error: " + e.message + "\nCheck internet connection.");
       }
     },
     args: [fullText]

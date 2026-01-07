@@ -6,6 +6,10 @@ let mediaStream = null;
 let currentConfig = {};
 let isProcessing = false;
 
+// Config constants
+const CHUNK_MS = 15000; // 15 seconds
+const MIN_BLOB_SIZE = 10000; // 10KB threshold for silence detection
+
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'INIT_RECORDER') {
     startRecording(msg.streamId, msg.config);
@@ -13,7 +17,6 @@ chrome.runtime.onMessage.addListener((msg) => {
     stopRecording();
   } else if (msg.action === 'UPDATE_CONFIG') {
     currentConfig = msg.config;
-    console.log("Config updated");
   }
 });
 
@@ -23,7 +26,7 @@ async function startRecording(streamId, config) {
   isProcessing = true;
 
   try {
-    // 1. Capture Stream
+    // 1. Get Stream
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         mandatory: {
@@ -34,23 +37,25 @@ async function startRecording(streamId, config) {
       video: false
     });
 
-    // 2. Playback Audio (prevent muting)
+    // 2. Audio Routing (CRITICAL: Preserves Tab Audio)
     audioCtx = new AudioContext();
     const source = audioCtx.createMediaStreamSource(mediaStream);
     source.connect(audioCtx.destination);
 
-    // 3. Setup Recorder
+    // 3. Recorder
     recorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm;codecs=opus' });
     
     recorder.ondataavailable = async (e) => {
-      if (e.data.size > 0) processChunk(e.data);
+      if (e.data.size > 0) {
+        await processChunk(e.data);
+      }
     };
 
-    // Chunk every 15s
-    recorder.start(15000); 
+    // Start chunking
+    recorder.start(CHUNK_MS);
 
   } catch (err) {
-    chrome.runtime.sendMessage({ action: 'OFFSCREEN_ERROR', error: "Stream access failed. " + err.message });
+    reportError("Audio capture failed: " + err.message);
     stopRecording();
   }
 }
@@ -65,6 +70,12 @@ function stopRecording() {
 async function processChunk(blob) {
   if (!isProcessing) return;
   
+  // Silence Detection (Simple size check)
+  if (blob.size < MIN_BLOB_SIZE) {
+    // Too quiet, likely silence. Skip API call.
+    return;
+  }
+
   try {
     const base64Data = await blobToBase64(blob);
     const text = await callGemini(base64Data);
@@ -73,10 +84,15 @@ async function processChunk(blob) {
       chrome.runtime.sendMessage({ action: 'TRANSCRIPT_RECEIVED', text });
     }
   } catch (err) {
-    console.error("API Error:", err);
+    console.error("Gemini API Error:", err);
     if (err.message.includes("403") || err.message.includes("key")) {
-       chrome.runtime.sendMessage({ action: 'OFFSCREEN_ERROR', error: "Invalid API Key." });
+       reportError("Invalid API Key.");
        stopRecording();
+    } else if (err.message.includes("429")) {
+       reportError("Rate limit exceeded. Waiting...");
+    } else {
+       // Non-fatal error, maybe just logging
+       console.log("Transient error:", err.message);
     }
   }
 }
@@ -84,23 +100,27 @@ async function processChunk(blob) {
 async function callGemini(base64Audio) {
   const { apiKey, sourceLang, targetLang } = currentConfig;
   
-  const source = sourceLang === 'Auto-detect' ? "Detect source language." : `Source: ${sourceLang}.`;
-  const target = (targetLang === 'None' || targetLang === sourceLang) 
-    ? "Transcribe verbatim. No translation." 
-    : `Translate to ${targetLang}.`;
+  // Prompt Construction
+  const sourcePart = sourceLang === 'Auto-detect' 
+    ? "Detect the source language automatically." 
+    : `The audio is in ${sourceLang}.`;
+    
+  const targetPart = (targetLang === 'None' || targetLang === sourceLang)
+    ? "Transcribe the audio verbatim. Do not translate."
+    : `Translate the content into ${targetLang}.`;
 
   const prompt = `
-    Task: Speech-to-text.
-    ${source}
-    ${target}
-    Strict Rules:
-    - Output raw text only.
-    - No timestamps, no speaker tags.
-    - Ignore silence/noise.
-    - If empty/music only, return empty string.
+    Task: Accurate Speech-to-Text.
+    ${sourcePart}
+    ${targetPart}
+    Instructions:
+    - Output ONLY the transcript/translation.
+    - Do NOT include timestamps, speaker names, or descriptions like [music].
+    - If the audio is silence or music only, return empty string.
   `;
 
-  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  // Using v1beta as it is commonly available for free keys
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
   
   const response = await fetch(url, {
     method: 'POST',
@@ -116,15 +136,25 @@ async function callGemini(base64Audio) {
   });
 
   const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
   
+  if (data.error) {
+    throw new Error(data.error.message);
+  }
+
   return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
 }
 
 function blobToBase64(blob) {
   return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+    reader.onloadend = () => {
+      const base64 = reader.result.split(',')[1];
+      resolve(base64);
+    };
     reader.readAsDataURL(blob);
   });
+}
+
+function reportError(msg) {
+  chrome.runtime.sendMessage({ action: 'OFFSCREEN_ERROR', error: msg });
 }

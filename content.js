@@ -1,5 +1,5 @@
 // content.js
-// The main UI for the extension.
+// Persistent Overlay UI for Gemini Live Translator
 
 const LANGUAGES = [
   "English", "Spanish", "French", "German", "Chinese (Simplified)", "Japanese", "Korean", "Russian", "Portuguese", "Italian",
@@ -15,15 +15,18 @@ let ui = {};
 let fullTranscript = [];
 let isCapturing = false;
 
-// Listen for messages from Background
+// --- Message Listener ---
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'TOGGLE_UI') {
     toggleOverlay();
   } else if (msg.action === 'TRANSCRIPT_UPDATE') {
     appendTranscript(msg.text);
+    setStatus("Listening...", 'active');
   } else if (msg.action === 'ERROR') {
     setStatus(msg.error, 'error');
-    setCapturingState(false);
+    if (msg.error.includes("Key") || msg.error.includes("Stream")) {
+      setCapturingState(false);
+    }
   } else if (msg.action === 'CAPTURE_STARTED') {
     setCapturingState(true);
   } else if (msg.action === 'CAPTURE_STOPPED') {
@@ -35,14 +38,26 @@ chrome.runtime.onMessage.addListener((msg) => {
 function toggleOverlay() {
   if (!overlayHost) {
     createOverlay();
+    // First time open: try to auto-start if key exists
+    chrome.storage.sync.get(['apiKey'], (res) => {
+      if (res.apiKey) startCapture();
+      else {
+        ui.settingsPanel.open = true;
+        setStatus("Enter API Key to start", 'warning');
+      }
+    });
+    return;
   }
   
   const container = ui.container;
   if (container.style.display === 'none') {
     container.style.display = 'flex';
-    attemptAutoStart();
+    // Re-opening: auto-start if key exists
+    chrome.storage.sync.get(['apiKey'], (res) => {
+      if (res.apiKey) startCapture();
+    });
   } else {
-    // If visible, hide and stop
+    // Closing
     container.style.display = 'none';
     if (isCapturing) {
       chrome.runtime.sendMessage({ action: 'REQUEST_STOP_CAPTURE' });
@@ -50,22 +65,11 @@ function toggleOverlay() {
   }
 }
 
-function attemptAutoStart() {
-  chrome.storage.sync.get(['apiKey'], (res) => {
-    if (res.apiKey) {
-      startCapture();
-    } else {
-      setStatus("Please enter API Key to start", 'warning');
-      ui.settingsPanel.open = true; // Open settings if key missing
-    }
-  });
-}
-
 function createOverlay() {
   overlayHost = document.createElement('div');
   overlayHost.id = 'gemini-translator-host';
-  // Reset CSS to prevent page style leak
-  overlayHost.style.cssText = 'all: initial; position: fixed; bottom: 20px; right: 20px; z-index: 2147483647;';
+  // CSS Reset for host to avoid page style pollution
+  overlayHost.style.cssText = 'all: initial; position: fixed; bottom: 20px; right: 20px; z-index: 2147483647; font-family: sans-serif;';
   document.body.appendChild(overlayHost);
 
   shadowRoot = overlayHost.attachShadow({ mode: 'open' });
@@ -73,256 +77,253 @@ function createOverlay() {
   // Styles
   const style = document.createElement('style');
   style.textContent = `
-    :host { font-family: -apple-system, system-ui, sans-serif; }
     .box {
-      width: 360px;
-      max-height: 500px;
+      width: 380px;
+      max-height: 600px;
       background: rgba(15, 23, 42, 0.98);
       border: 1px solid #334155;
       border-radius: 12px;
       color: #f8fafc;
       display: flex;
       flex-direction: column;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
       font-size: 14px;
-      transition: opacity 0.2s;
+      backdrop-filter: blur(10px);
     }
     .header {
-      padding: 12px;
+      padding: 12px 16px;
       background: #1e293b;
       border-bottom: 1px solid #334155;
       display: flex;
       justify-content: space-between;
       align-items: center;
       border-radius: 12px 12px 0 0;
-      cursor: default;
+      cursor: grab;
+      user-select: none;
     }
+    .header:active { cursor: grabbing; }
     .title { font-weight: 600; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
-    .status-dot { width: 8px; height: 8px; background: #64748b; border-radius: 50%; transition: background 0.3s; }
-    .status-dot.active { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
-    .status-dot.error { background: #ef4444; }
-    
-    .controls { display: flex; gap: 8px; }
-    .btn-icon { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 16px; padding: 4px; border-radius: 4px; }
-    .btn-icon:hover { background: #334155; color: white; }
+    .dot { width: 8px; height: 8px; background: #64748b; border-radius: 50%; transition: background 0.3s; }
+    .dot.active { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+    .dot.error { background: #ef4444; }
 
-    .settings {
-      background: #0f172a;
-      border-bottom: 1px solid #334155;
-      padding: 12px;
+    .controls button {
+      background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 16px; padding: 4px 8px; border-radius: 4px;
     }
-    .input-group { margin-bottom: 10px; }
-    .input-group label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 4px; }
+    .controls button:hover { background: #334155; color: white; }
+
+    .settings { background: #0f172a; border-bottom: 1px solid #334155; padding: 12px; }
+    .row { margin-bottom: 10px; }
+    label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 4px; text-transform: uppercase; }
     input, select {
       width: 100%; box-sizing: border-box; background: #1e293b; border: 1px solid #475569;
       color: white; padding: 8px; border-radius: 6px; font-size: 13px; outline: none;
     }
     input:focus, select:focus { border-color: #38bdf8; }
 
-    .status-bar {
-      padding: 8px 12px;
-      font-size: 12px;
-      color: #94a3b8;
-      border-bottom: 1px solid #334155;
-      background: #1e293b;
-      text-align: center;
-    }
-    .status-bar.error { color: #ef4444; }
-    .status-bar.warning { color: #fbbf24; }
+    .status { padding: 8px 12px; font-size: 12px; color: #94a3b8; background: #1e293b; border-bottom: 1px solid #334155; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .status.active { color: #22c55e; }
+    .status.warning { color: #fbbf24; }
+    .status.error { color: #ef4444; }
 
     .transcript {
-      flex: 1;
-      height: 250px;
-      overflow-y: auto;
-      padding: 12px;
-      line-height: 1.5;
+      flex: 1; min-height: 150px; max-height: 300px; overflow-y: auto; padding: 12px;
+      font-family: system-ui, -apple-system, sans-serif; line-height: 1.5;
     }
-    .msg { margin-bottom: 10px; animation: fade 0.3s; }
-    .msg.sys { font-style: italic; color: #64748b; font-size: 12px; text-align: center; border-top: 1px solid #334155; padding-top: 5px; }
-    @keyframes fade { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; } }
+    .msg { margin-bottom: 10px; animation: slideIn 0.2s; }
+    .sys { font-style: italic; color: #64748b; font-size: 12px; text-align: center; margin: 15px 0; border-top: 1px solid #334155; padding-top: 5px; }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; } }
 
-    .footer {
-      padding: 10px;
-      border-top: 1px solid #334155;
-      display: flex;
-      gap: 8px;
+    .footer { padding: 10px; border-top: 1px solid #334155; display: flex; gap: 8px; }
+    .btn {
+      flex: 1; background: #334155; border: none; color: #e2e8f0; padding: 8px; border-radius: 6px;
+      cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.2s;
     }
-    .action-btn {
-      flex: 1;
-      background: #334155;
-      border: none;
-      color: #e2e8f0;
-      padding: 8px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 12px;
-      font-weight: 500;
-    }
-    .action-btn:hover { background: #475569; color: white; }
+    .btn:hover { background: #475569; color: white; }
+
+    details > summary { cursor: pointer; outline: none; color: #94a3b8; font-size: 12px; list-style: none; }
+    details > summary:hover { color: #38bdf8; }
+    details[open] > summary { margin-bottom: 8px; color: #38bdf8; }
     
+    /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
-    
-    details > summary { list-style: none; cursor: pointer; outline: none; color: #94a3b8; font-size: 12px; padding: 4px 0; }
-    details > summary:hover { color: #38bdf8; }
-    details[open] > summary { color: #38bdf8; margin-bottom: 8px; }
   `;
   shadowRoot.appendChild(style);
 
-  // HTML Structure
+  // Structure
   const box = document.createElement('div');
   box.className = 'box';
   box.innerHTML = `
-    <div class="header">
-      <div class="title">
-        <div class="status-dot" id="dot"></div> Gemini Live
-      </div>
+    <div class="header" id="header">
+      <div class="title"><div class="dot" id="dot"></div> Gemini Live</div>
       <div class="controls">
-        <button class="btn-icon" id="toggle-settings">⚙️</button>
-        <button class="btn-icon" id="close-btn">✕</button>
+        <button id="btn-settings" title="Settings">⚙️</button>
+        <button id="btn-close" title="Close">✕</button>
       </div>
     </div>
     
     <details class="settings" id="settings-panel">
       <summary>Configuration</summary>
-      <div class="input-group">
+      <div class="row">
         <label>Gemini API Key</label>
-        <input type="password" id="api-key" placeholder="Paste API Key here...">
+        <input type="password" id="inp-key" placeholder="Paste API Key here...">
       </div>
-      <div class="input-group">
+      <div class="row">
         <label>Source Language</label>
-        <select id="source-lang">
+        <select id="sel-source">
           <option value="Auto-detect">✨ Auto-detect</option>
         </select>
       </div>
-      <div class="input-group">
+      <div class="row">
         <label>Target Language</label>
-        <select id="target-lang">
-          <option value="None">None (Same-language captions)</option>
+        <select id="sel-target">
+          <option value="None">None (Captions Only)</option>
         </select>
       </div>
     </details>
 
-    <div class="status-bar" id="status-text">Ready</div>
-
+    <div class="status" id="status">Ready</div>
     <div class="transcript" id="output"></div>
 
     <div class="footer">
-      <button class="action-btn" id="copy-btn">Copy</button>
-      <button class="action-btn" id="pdf-btn">PDF</button>
+      <button class="btn" id="btn-copy">Copy All</button>
+      <button class="btn" id="btn-pdf">Download PDF</button>
     </div>
   `;
   shadowRoot.appendChild(box);
 
-  // Cache UI references
+  // Elements
   ui = {
     container: box,
+    header: box.querySelector('#header'),
     dot: box.querySelector('#dot'),
     settingsPanel: box.querySelector('#settings-panel'),
-    apiKey: box.querySelector('#api-key'),
-    source: box.querySelector('#source-lang'),
-    target: box.querySelector('#target-lang'),
-    status: box.querySelector('#status-text'),
+    key: box.querySelector('#inp-key'),
+    source: box.querySelector('#sel-source'),
+    target: box.querySelector('#sel-target'),
+    status: box.querySelector('#status'),
     output: box.querySelector('#output'),
-    close: box.querySelector('#close-btn'),
-    settingsToggle: box.querySelector('#toggle-settings'),
-    copy: box.querySelector('#copy-btn'),
-    pdf: box.querySelector('#pdf-btn')
+    close: box.querySelector('#btn-close'),
+    settingsToggle: box.querySelector('#btn-settings'),
+    copy: box.querySelector('#btn-copy'),
+    pdf: box.querySelector('#btn-pdf')
   };
 
   // Populate Languages
-  LANGUAGES.forEach(lang => {
-    ui.source.add(new Option(lang, lang));
-    ui.target.add(new Option(lang, lang));
+  LANGUAGES.forEach(l => {
+    ui.source.add(new Option(l, l));
+    ui.target.add(new Option(l, l));
   });
 
-  // Load Settings
+  // Load Config
   chrome.storage.sync.get(['apiKey', 'sourceLang', 'targetLang'], (data) => {
-    if (data.apiKey) ui.apiKey.value = data.apiKey;
+    if (data.apiKey) ui.key.value = data.apiKey;
     if (data.sourceLang) ui.source.value = data.sourceLang;
     if (data.targetLang) ui.target.value = data.targetLang;
   });
 
-  // Event Listeners
+  // -- Interactions --
+
+  // 1. Settings Update
+  const updateConfig = () => {
+    const config = {
+      apiKey: ui.key.value.trim(),
+      sourceLang: ui.source.value,
+      targetLang: ui.target.value
+    };
+    chrome.storage.sync.set(config);
+    
+    if (isCapturing) {
+      chrome.runtime.sendMessage({ action: 'UPDATE_CONFIG', config });
+    } else if (config.apiKey && ui.container.style.display !== 'none') {
+      startCapture(); // Auto-start if key entered
+    }
+  };
+  ui.key.onchange = updateConfig;
+  ui.source.onchange = updateConfig;
+  ui.target.onchange = updateConfig;
+
+  // 2. Close / Settings Toggle
   ui.close.onclick = () => {
     ui.container.style.display = 'none';
     if (isCapturing) chrome.runtime.sendMessage({ action: 'REQUEST_STOP_CAPTURE' });
   };
-
   ui.settingsToggle.onclick = () => {
     ui.settingsPanel.open = !ui.settingsPanel.open;
   };
 
-  // Config Changes (Live Update)
-  const updateConfig = () => {
-    const config = {
-      apiKey: ui.apiKey.value.trim(),
-      sourceLang: ui.source.value,
-      targetLang: ui.target.value
-    };
-    
-    // Save
-    chrome.storage.sync.set(config);
-    
-    // Update live session if active
-    if (isCapturing) {
-      chrome.runtime.sendMessage({ action: 'UPDATE_CONFIG', config });
-    } else if (config.apiKey && !isCapturing && ui.container.style.display !== 'none') {
-      // If user enters key while "waiting", start
-      startCapture();
-    }
+  // 3. Dragging
+  let isDragging = false, startX, startY, initLeft, initBottom;
+  ui.header.onmousedown = (e) => {
+    isDragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    const rect = overlayHost.getBoundingClientRect();
+    initLeft = rect.left;
+    initBottom = window.innerHeight - rect.bottom; // use bottom/right positioning
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  };
+  const onMouseMove = (e) => {
+    if (!isDragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    overlayHost.style.right = 'auto';
+    overlayHost.style.bottom = 'auto';
+    overlayHost.style.left = (initLeft + dx) + 'px';
+    overlayHost.style.top = (window.innerHeight - initBottom - overlayHost.offsetHeight + dy) + 'px';
+  };
+  const onMouseUp = () => {
+    isDragging = false;
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
   };
 
-  ui.apiKey.addEventListener('change', updateConfig);
-  ui.source.addEventListener('change', updateConfig);
-  ui.target.addEventListener('change', updateConfig);
-
+  // 4. Actions
   ui.copy.onclick = (e) => {
-    navigator.clipboard.writeText(fullTranscript.join('\n\n'));
-    const old = e.target.textContent;
-    e.target.textContent = 'Copied!';
-    setTimeout(() => e.target.textContent = old, 1500);
+    if (fullTranscript.length === 0) return;
+    navigator.clipboard.writeText(fullTranscript.join('\n\n')).then(() => {
+      const old = e.target.textContent;
+      e.target.textContent = 'Copied!';
+      setTimeout(() => e.target.textContent = old, 1500);
+    });
   };
 
   ui.pdf.onclick = () => {
+    if (fullTranscript.length === 0) return;
     chrome.runtime.sendMessage({ action: 'DOWNLOAD_PDF', text: fullTranscript.join('\n\n') });
   };
 }
 
+// Helpers
 function startCapture() {
-  const apiKey = ui.apiKey.value.trim();
+  const apiKey = ui.key.value.trim();
   if (!apiKey) return;
-
-  setStatus("Initializing capture...", 'warning');
+  
+  setStatus("Initializing...", 'warning');
   chrome.runtime.sendMessage({
     action: 'REQUEST_START_CAPTURE',
-    config: {
-      apiKey,
-      sourceLang: ui.source.value,
-      targetLang: ui.target.value
-    }
+    config: { apiKey, sourceLang: ui.source.value, targetLang: ui.target.value }
   });
 }
 
 function setCapturingState(active) {
   isCapturing = active;
   if (active) {
-    ui.dot.className = 'status-dot active';
-    setStatus("Listening...");
+    ui.dot.className = 'dot active';
+    setStatus("Listening...", 'active');
   } else {
-    ui.dot.className = 'status-dot';
-    // Only reset status text if it's not an error
-    if (!ui.status.classList.contains('error')) {
-      setStatus("Stopped");
-    }
+    ui.dot.className = 'dot';
+    if (!ui.status.classList.contains('error')) setStatus("Stopped");
   }
 }
 
 function setStatus(text, type = '') {
   ui.status.textContent = text;
-  ui.status.className = `status-bar ${type}`;
-  if (type === 'error') ui.dot.className = 'status-dot error';
+  ui.status.className = `status ${type}`;
+  if (type === 'error') ui.dot.className = 'dot error';
 }
 
 function appendTranscript(text, isSystem = false) {
