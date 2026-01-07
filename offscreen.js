@@ -6,9 +6,10 @@ let mediaStream = null;
 let currentConfig = {};
 let isProcessing = false;
 
-// Config constants
-const CHUNK_MS = 15000; // 15 seconds
-const MIN_BLOB_SIZE = 10000; // 10KB threshold for silence detection
+// 15 seconds chunking
+const CHUNK_MS = 15000; 
+// 10KB threshold. If blob is smaller, it's silence/quiet noise.
+const MIN_BLOB_SIZE = 10000; 
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'INIT_RECORDER') {
@@ -37,7 +38,7 @@ async function startRecording(streamId, config) {
       video: false
     });
 
-    // 2. Audio Routing (CRITICAL: Preserves Tab Audio)
+    // 2. Audio Routing (Preserve Tab Audio)
     audioCtx = new AudioContext();
     const source = audioCtx.createMediaStreamSource(mediaStream);
     source.connect(audioCtx.destination);
@@ -70,11 +71,16 @@ function stopRecording() {
 async function processChunk(blob) {
   if (!isProcessing) return;
   
-  // Silence Detection (Simple size check)
+  console.log(`Processing chunk: ${blob.size} bytes`);
+
+  // Silence Check
   if (blob.size < MIN_BLOB_SIZE) {
-    // Too quiet, likely silence. Skip API call.
+    chrome.runtime.sendMessage({ action: 'NO_SPEECH' });
     return;
   }
+
+  // Notify Background we are processing
+  chrome.runtime.sendMessage({ action: 'CHUNK_PROCESSED' });
 
   try {
     const base64Data = await blobToBase64(blob);
@@ -82,17 +88,18 @@ async function processChunk(blob) {
     
     if (text) {
       chrome.runtime.sendMessage({ action: 'TRANSCRIPT_RECEIVED', text });
+    } else {
+      chrome.runtime.sendMessage({ action: 'NO_SPEECH' });
     }
   } catch (err) {
     console.error("Gemini API Error:", err);
     if (err.message.includes("403") || err.message.includes("key")) {
-       reportError("Invalid API Key.");
+       reportError("Invalid API Key (Check Settings)");
        stopRecording();
     } else if (err.message.includes("429")) {
-       reportError("Rate limit exceeded. Waiting...");
+       reportError("Rate Limit (Wait a moment)");
     } else {
-       // Non-fatal error, maybe just logging
-       console.log("Transient error:", err.message);
+       reportError("API Error: " + err.message);
     }
   }
 }
@@ -100,27 +107,18 @@ async function processChunk(blob) {
 async function callGemini(base64Audio) {
   const { apiKey, sourceLang, targetLang } = currentConfig;
   
-  // Prompt Construction
-  const sourcePart = sourceLang === 'Auto-detect' 
-    ? "Detect the source language automatically." 
-    : `The audio is in ${sourceLang}.`;
-    
-  const targetPart = (targetLang === 'None' || targetLang === sourceLang)
-    ? "Transcribe the audio verbatim. Do not translate."
-    : `Translate the content into ${targetLang}.`;
+  const instruction = `
+You are an expert transcriber and translator.
+- Transcribe the audio accurately.
+- ${sourceLang === 'Auto-detect' ? 'Auto-detect the spoken language.' : `Spoken language is ${sourceLang}.`}
+- ${targetLang === 'None' ? 'Output clean English text only (or detected language).' : `Translate to ${targetLang}.`}
+- Always: Add proper punctuation, capitalization, and grammar. Make it read naturally like written text. Fix any repetition or errors.
+- Output ONLY the clean text. No labels, timestamps, or extras.
+- If no clear speech (silence, noise, music only), output nothing.
+  `.trim();
 
-  const prompt = `
-    Task: Accurate Speech-to-Text.
-    ${sourcePart}
-    ${targetPart}
-    Instructions:
-    - Output ONLY the transcript/translation.
-    - Do NOT include timestamps, speaker names, or descriptions like [music].
-    - If the audio is silence or music only, return empty string.
-  `;
-
-  // Using v1beta as it is commonly available for free keys
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  // Endpoint: Using flash-latest as requested
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
   
   const response = await fetch(url, {
     method: 'POST',
@@ -128,19 +126,21 @@ async function callGemini(base64Audio) {
     body: JSON.stringify({
       contents: [{
         parts: [
-          { text: prompt },
+          { text: instruction },
           { inline_data: { mime_type: "audio/webm", data: base64Audio } }
         ]
       }]
     })
   });
 
-  const data = await response.json();
-  
-  if (data.error) {
-    throw new Error(data.error.message);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`HTTP ${response.status}: ${errText}`);
   }
 
+  const data = await response.json();
+  
+  // Extract text
   return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
 }
 

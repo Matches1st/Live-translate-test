@@ -14,19 +14,36 @@ let shadowRoot = null;
 let ui = {};
 let fullTranscript = [];
 let isCapturing = false;
+let silenceCount = 0;
 
 // --- Message Listener ---
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'TOGGLE_UI') {
     toggleOverlay();
-  } else if (msg.action === 'TRANSCRIPT_UPDATE') {
+  } else if (msg.action === 'TRANSCRIPT_RECEIVED') {
     appendTranscript(msg.text);
     setStatus("Listening...", 'active');
-  } else if (msg.action === 'ERROR') {
+    silenceCount = 0;
+  } else if (msg.action === 'CHUNK_PROCESSED') {
+    // Only show "Processing" briefly if we haven't just received text
+    if (ui.status.textContent !== "Listening...") {
+      setStatus("Listening...", 'active');
+    }
+  } else if (msg.action === 'NO_SPEECH') {
+    silenceCount++;
+    if (silenceCount > 1) {
+      setStatus("Listening... (no speech detected yet)", 'warning');
+    } else {
+      setStatus("Listening...", 'active');
+    }
+  } else if (msg.action === 'OFFSCREEN_ERROR') {
     setStatus(msg.error, 'error');
     if (msg.error.includes("Key") || msg.error.includes("Stream")) {
       setCapturingState(false);
     }
+  } else if (msg.action === 'ERROR') {
+    setStatus(msg.error, 'error');
+    setCapturingState(false);
   } else if (msg.action === 'CAPTURE_STARTED') {
     setCapturingState(true);
   } else if (msg.action === 'CAPTURE_STOPPED') {
@@ -38,7 +55,6 @@ chrome.runtime.onMessage.addListener((msg) => {
 function toggleOverlay() {
   if (!overlayHost) {
     createOverlay();
-    // First time open: try to auto-start if key exists
     chrome.storage.sync.get(['apiKey'], (res) => {
       if (res.apiKey) startCapture();
       else {
@@ -52,12 +68,10 @@ function toggleOverlay() {
   const container = ui.container;
   if (container.style.display === 'none') {
     container.style.display = 'flex';
-    // Re-opening: auto-start if key exists
     chrome.storage.sync.get(['apiKey'], (res) => {
       if (res.apiKey) startCapture();
     });
   } else {
-    // Closing
     container.style.display = 'none';
     if (isCapturing) {
       chrome.runtime.sendMessage({ action: 'REQUEST_STOP_CAPTURE' });
@@ -68,13 +82,11 @@ function toggleOverlay() {
 function createOverlay() {
   overlayHost = document.createElement('div');
   overlayHost.id = 'gemini-translator-host';
-  // CSS Reset for host to avoid page style pollution
   overlayHost.style.cssText = 'all: initial; position: fixed; bottom: 20px; right: 20px; z-index: 2147483647; font-family: sans-serif;';
   document.body.appendChild(overlayHost);
 
   shadowRoot = overlayHost.attachShadow({ mode: 'open' });
 
-  // Styles
   const style = document.createElement('style');
   style.textContent = `
     .box {
@@ -145,14 +157,12 @@ function createOverlay() {
     details > summary:hover { color: #38bdf8; }
     details[open] > summary { margin-bottom: 8px; color: #38bdf8; }
     
-    /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
   `;
   shadowRoot.appendChild(style);
 
-  // Structure
   const box = document.createElement('div');
   box.className = 'box';
   box.innerHTML = `
@@ -194,7 +204,6 @@ function createOverlay() {
   `;
   shadowRoot.appendChild(box);
 
-  // Elements
   ui = {
     container: box,
     header: box.querySelector('#header'),
@@ -211,22 +220,17 @@ function createOverlay() {
     pdf: box.querySelector('#btn-pdf')
   };
 
-  // Populate Languages
   LANGUAGES.forEach(l => {
     ui.source.add(new Option(l, l));
     ui.target.add(new Option(l, l));
   });
 
-  // Load Config
   chrome.storage.sync.get(['apiKey', 'sourceLang', 'targetLang'], (data) => {
     if (data.apiKey) ui.key.value = data.apiKey;
     if (data.sourceLang) ui.source.value = data.sourceLang;
     if (data.targetLang) ui.target.value = data.targetLang;
   });
 
-  // -- Interactions --
-
-  // 1. Settings Update
   const updateConfig = () => {
     const config = {
       apiKey: ui.key.value.trim(),
@@ -234,18 +238,16 @@ function createOverlay() {
       targetLang: ui.target.value
     };
     chrome.storage.sync.set(config);
-    
     if (isCapturing) {
       chrome.runtime.sendMessage({ action: 'UPDATE_CONFIG', config });
     } else if (config.apiKey && ui.container.style.display !== 'none') {
-      startCapture(); // Auto-start if key entered
+      startCapture();
     }
   };
   ui.key.onchange = updateConfig;
   ui.source.onchange = updateConfig;
   ui.target.onchange = updateConfig;
 
-  // 2. Close / Settings Toggle
   ui.close.onclick = () => {
     ui.container.style.display = 'none';
     if (isCapturing) chrome.runtime.sendMessage({ action: 'REQUEST_STOP_CAPTURE' });
@@ -254,7 +256,6 @@ function createOverlay() {
     ui.settingsPanel.open = !ui.settingsPanel.open;
   };
 
-  // 3. Dragging
   let isDragging = false, startX, startY, initLeft, initBottom;
   ui.header.onmousedown = (e) => {
     isDragging = true;
@@ -262,7 +263,7 @@ function createOverlay() {
     startY = e.clientY;
     const rect = overlayHost.getBoundingClientRect();
     initLeft = rect.left;
-    initBottom = window.innerHeight - rect.bottom; // use bottom/right positioning
+    initBottom = window.innerHeight - rect.bottom;
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
   };
@@ -281,7 +282,6 @@ function createOverlay() {
     document.removeEventListener('mouseup', onMouseUp);
   };
 
-  // 4. Actions
   ui.copy.onclick = (e) => {
     if (fullTranscript.length === 0) return;
     navigator.clipboard.writeText(fullTranscript.join('\n\n')).then(() => {
@@ -297,12 +297,12 @@ function createOverlay() {
   };
 }
 
-// Helpers
 function startCapture() {
   const apiKey = ui.key.value.trim();
   if (!apiKey) return;
   
-  setStatus("Initializing...", 'warning');
+  setStatus("Initializing... (play audio in tab)", 'warning');
+  silenceCount = 0;
   chrome.runtime.sendMessage({
     action: 'REQUEST_START_CAPTURE',
     config: { apiKey, sourceLang: ui.source.value, targetLang: ui.target.value }
@@ -313,7 +313,7 @@ function setCapturingState(active) {
   isCapturing = active;
   if (active) {
     ui.dot.className = 'dot active';
-    setStatus("Listening...", 'active');
+    setStatus("Listening... (play clear speech)", 'active');
   } else {
     ui.dot.className = 'dot';
     if (!ui.status.classList.contains('error')) setStatus("Stopped");
@@ -328,7 +328,6 @@ function setStatus(text, type = '') {
 
 function appendTranscript(text, isSystem = false) {
   if (!isSystem) fullTranscript.push(text);
-  
   const div = document.createElement('div');
   div.className = isSystem ? 'msg sys' : 'msg';
   div.textContent = text;
