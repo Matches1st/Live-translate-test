@@ -3,51 +3,69 @@
 <head>
   <meta charset="UTF-8">
   <style>
-    body { width: 320px; font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; padding: 16px; margin: 0; }
-    h1 { font-size: 16px; margin: 0 0 16px 0; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
-    .logo { background: linear-gradient(135deg, #3b82f6, #8b5cf6); width: 20px; height: 20px; border-radius: 4px; display: inline-block; }
+    :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --accent: #3b82f6; --danger: #ef4444; --border: #334155; }
+    body { width: 340px; background: var(--bg); color: var(--text); font-family: -apple-system, sans-serif; padding: 16px; margin: 0; }
     
-    label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 4px; margin-top: 12px; }
-    input, select { width: 100%; box-sizing: border-box; background: #1e293b; border: 1px solid #334155; color: white; padding: 8px; border-radius: 6px; font-size: 13px; outline: none; }
-    input:focus, select:focus { border-color: #38bdf8; }
-    
-    .btn-group { display: flex; gap: 8px; margin-top: 16px; }
-    button { flex: 1; padding: 10px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; color: white; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    #startBtn { background: #2563eb; }
-    #startBtn:hover:not(:disabled) { background: #1d4ed8; }
-    #stopBtn { background: #dc2626; }
-    #stopBtn:hover:not(:disabled) { background: #b91c1c; }
+    .header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .icon { width: 24px; height: 24px; background: linear-gradient(135deg, #60a5fa, #a78bfa); border-radius: 6px; }
+    h2 { margin: 0; font-size: 16px; font-weight: 600; }
 
-    #status { margin-top: 12px; font-size: 12px; text-align: center; height: 16px; color: #94a3b8; }
-    .error { color: #f87171 !important; }
+    .group { margin-bottom: 12px; }
+    label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
     
-    .link { font-size: 11px; color: #60a5fa; text-decoration: none; display: block; margin-top: 4px; text-align: right; }
+    input, select {
+      width: 100%; box-sizing: border-box; background: var(--card); border: 1px solid var(--border);
+      color: white; padding: 10px; border-radius: 6px; font-size: 13px; outline: none; transition: border 0.2s;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+
+    .btn-row { display: flex; gap: 10px; margin-top: 20px; }
+    button {
+      flex: 1; padding: 12px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; color: white; transition: opacity 0.2s;
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #start { background: var(--accent); }
+    #stop { background: var(--danger); }
+
+    .link { text-align: right; margin-top: 4px; }
+    .link a { color: var(--accent); font-size: 11px; text-decoration: none; }
+    
+    #status { margin-top: 16px; text-align: center; font-size: 12px; color: #94a3b8; min-height: 18px; }
+    .error { color: var(--danger) !important; }
   </style>
 </head>
 <body>
-  <h1><span class="logo"></span> Gemini Live Translator</h1>
-
-  <label>API Key</label>
-  <input type="password" id="apiKey" placeholder="Paste Gemini API Key">
-  <a href="https://aistudio.google.com/app/apikey" target="_blank" class="link">Get Free Key &rarr;</a>
-
-  <label>Source Language</label>
-  <select id="sourceLang">
-    <option value="Auto-detect">✨ Auto-detect</option>
-  </select>
-
-  <label>Target Language</label>
-  <select id="targetLang">
-    <option value="None">None (Transcribe Only)</option>
-  </select>
-
-  <div class="btn-group">
-    <button id="startBtn">Start</button>
-    <button id="stopBtn" disabled>Stop</button>
+  <div class="header">
+    <div class="icon"></div>
+    <h2>Gemini Live Translator</h2>
   </div>
 
-  <div id="status">Ready</div>
+  <div class="group">
+    <label>Gemini API Key</label>
+    <input type="password" id="apiKey" placeholder="Paste key here...">
+    <div class="link"><a href="https://aistudio.google.com/app/apikey" target="_blank">Get free key &rarr;</a></div>
+  </div>
+
+  <div class="group">
+    <label>Source Language</label>
+    <select id="sourceLang">
+      <option value="Auto-detect">✨ Auto-detect</option>
+    </select>
+  </div>
+
+  <div class="group">
+    <label>Target Language</label>
+    <select id="targetLang">
+      <option value="None">None (Transcribe Only)</option>
+    </select>
+  </div>
+
+  <div class="btn-row">
+    <button id="start">Start Capture</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+
+  <div id="status">Ready to capture</div>
 
   <script src="popup.js"></script>
 </body>

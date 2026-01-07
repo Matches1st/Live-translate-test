@@ -1,123 +1,158 @@
 // background.js
+// Orchestrates the offscreen document and message passing.
 
-// 1. Manage Offscreen Document
-async function ensureOffscreenDocument() {
+let isCapturing = false;
+
+// 1. Lifecycle Management for Offscreen Document
+async function setupOffscreenDocument(path) {
+  // Check if it already exists
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT'],
-    documentUrls: ['offscreen.html']
+    documentUrls: [path]
   });
 
-  if (existingContexts.length > 0) return;
+  if (existingContexts.length > 0) {
+    return;
+  }
 
+  // Create hidden document
   await chrome.offscreen.createDocument({
-    url: 'offscreen.html',
-    reasons: ['USER_MEDIA'],
-    justification: 'Recording tab audio for AI transcription'
+    url: path,
+    reasons: ['AUDIO_PLAYBACK'], // Critical for keeping tab audio alive
+    justification: 'Recording tab audio for transcription',
   });
+}
+
+async function closeOffscreenDocument() {
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT']
+  });
+  
+  if (existingContexts.length > 0) {
+    await chrome.offscreen.closeDocument();
+  }
 }
 
 // 2. Message Listener
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'START_CAPTURE') {
-    handleStartCapture(message);
+    startCapture(message);
+    return true; // Keep channel open
   } else if (message.action === 'STOP_CAPTURE') {
-    chrome.runtime.sendMessage({ action: 'STOP_RECORDING' }); // Send to offscreen
+    stopCapture();
+    return true;
   } else if (message.action === 'TRANSCRIPT_RECEIVED') {
-    // Forward transcript from Offscreen -> Active Tab Content Script
-    forwardTranscriptToActiveTab(message.text);
-  } else if (message.action === 'DOWNLOAD_PDF') {
-    // Inject PDF generation into the Main World of the tab
-    if (sender.tab?.id) {
-      chrome.scripting.executeScript({
-        target: { tabId: sender.tab.id },
-        world: 'MAIN',
-        func: generatePdfInMainWorld,
-        args: [message.text]
-      });
-    }
+    // Forward from Offscreen to Content Script (Active Tab)
+    broadcastToActiveTab({ action: 'UPDATE_TRANSCRIPT', text: message.text });
   } else if (message.action === 'ERROR') {
-    console.error("Extension Error:", message.error);
+    broadcastToActiveTab({ action: 'SHOW_ERROR', error: message.error });
+  } else if (message.action === 'DOWNLOAD_PDF') {
+    injectPdfGenerator(sender.tab.id, message.text);
   }
 });
 
-async function handleStartCapture(data) {
+async function startCapture(data) {
+  if (isCapturing) return;
+  
   try {
-    await ensureOffscreenDocument();
-    
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!activeTab) {
-      chrome.runtime.sendMessage({ action: 'UI_ERROR', error: 'No active tab found.' });
-      return;
+      throw new Error("No active tab found.");
     }
 
-    // Initialize content script overlay
+    // A. Ensure offscreen exists
+    await setupOffscreenDocument('offscreen.html');
+    isCapturing = true;
+
+    // B. Get Stream ID (Must be done in background)
+    const streamId = await chrome.tabCapture.getMediaStreamId({
+      targetTabId: activeTab.id
+    });
+
+    // C. Inject Content Script Overlay
     await chrome.scripting.executeScript({
       target: { tabId: activeTab.id },
       files: ['content.js']
     });
     
-    // Slight delay to ensure content script is ready
+    // Slight delay to ensure script loads
     setTimeout(() => {
       chrome.tabs.sendMessage(activeTab.id, { action: 'SHOW_OVERLAY' }).catch(() => {});
-    }, 500);
+    }, 200);
 
-    // Tell Offscreen to start recording this specific tab
+    // D. Send configuration to Offscreen to start recording
     chrome.runtime.sendMessage({
-      action: 'INIT_RECORDING',
-      targetTabId: activeTab.id,
+      action: 'INIT_RECORDER',
+      streamId: streamId,
       apiKey: data.apiKey,
       sourceLang: data.sourceLang,
       targetLang: data.targetLang
     });
 
   } catch (err) {
-    chrome.runtime.sendMessage({ action: 'UI_ERROR', error: err.message });
+    console.error("Start failed:", err);
+    broadcastToActiveTab({ action: 'SHOW_ERROR', error: err.message });
+    isCapturing = false;
+    closeOffscreenDocument();
   }
 }
 
-async function forwardTranscriptToActiveTab(text) {
+async function stopCapture() {
+  isCapturing = false;
+  // Notify offscreen to stop media tracks first
+  chrome.runtime.sendMessage({ action: 'STOP_RECORDER' });
+  
+  // Give it a moment to cleanup, then close doc
+  setTimeout(async () => {
+    await closeOffscreenDocument();
+    broadcastToActiveTab({ action: 'CAPTURE_STOPPED' });
+  }, 500);
+}
+
+async function broadcastToActiveTab(msg) {
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (activeTab) {
-    chrome.tabs.sendMessage(activeTab.id, { 
-      action: 'APPEND_TRANSCRIPT', 
-      text: text 
-    }).catch(err => console.log('Tab closed or content script missing'));
+    chrome.tabs.sendMessage(activeTab.id, msg).catch(() => {
+      // Content script might not be injected yet or tab changed
+    });
   }
 }
 
-// 3. PDF Generator (Runs in Main World to access CDN)
-async function generatePdfInMainWorld(fullText) {
-  try {
-    // Dynamically import jsPDF from CDN
-    // Note: We use the UMD build which sets window.jspdf
-    const { jsPDF } = await import('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
-    
-    const doc = new jsPDF();
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const margin = 15;
-    const maxLineWidth = pageWidth - (margin * 2);
+// Inject PDF generation logic into Main World (to access CDN)
+function injectPdfGenerator(tabId, fullText) {
+  chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    world: 'MAIN', // Allows fetching external CDNs more easily
+    func: async (text) => {
+      try {
+        const { jsPDF } = await import('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+        const doc = new jsPDF();
+        
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const margin = 15;
+        const maxLineWidth = pageWidth - (margin * 2);
 
-    doc.setFontSize(18);
-    doc.text("Gemini Live Transcript", margin, 20);
-    
-    doc.setFontSize(12);
-    
-    // Split text into lines that fit the page
-    const lines = doc.splitTextToSize(fullText, maxLineWidth);
-    let y = 35;
+        doc.setFontSize(18);
+        doc.text("Gemini Live Transcript", margin, 20);
+        doc.setFontSize(12);
 
-    lines.forEach(line => {
-      if (y > 280) {
-        doc.addPage();
-        y = 20;
+        const lines = doc.splitTextToSize(text, maxLineWidth);
+        let y = 35;
+
+        lines.forEach(line => {
+          if (y > 280) {
+            doc.addPage();
+            y = 20;
+          }
+          doc.text(line, margin, y);
+          y += 7;
+        });
+
+        doc.save(`transcript_${Date.now()}.pdf`);
+      } catch (e) {
+        alert("Error generating PDF: " + e.message);
       }
-      doc.text(line, margin, y);
-      y += 7;
-    });
-
-    doc.save(`transcript_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.pdf`);
-  } catch (e) {
-    alert("Failed to generate PDF. Ensure internet connection for CDN load.");
-    console.error(e);
-  }
+    },
+    args: [fullText]
+  });
 }

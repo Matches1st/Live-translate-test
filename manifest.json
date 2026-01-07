@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Gemini Live Tab Translator",
-  "version": "1.0",
-  "description": "Real-time tab audio transcription and translation using Gemini API",
+  "version": "2.0",
+  "description": "Real-time tab audio transcription and translation using Gemini 1.5 Flash",
   "action": {
     "default_popup": "popup.html",
     "default_title": "Gemini Translator"

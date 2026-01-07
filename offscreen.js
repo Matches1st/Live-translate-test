@@ -1,128 +1,139 @@
 // offscreen.js
+// Handles the audio stream, routing, recording, and API calls.
 
 let recorder = null;
-let audioContext = null;
+let audioCtx = null;
 let mediaStream = null;
-let isRecording = false;
+let config = {};
+let isProcessing = false;
 
-// Config
-const CHUNK_DURATION_MS = 15000; // 15 seconds
-const MODEL = 'gemini-1.5-flash';
-
-chrome.runtime.onMessage.addListener(async (msg) => {
-  if (msg.action === 'INIT_RECORDING') {
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.action === 'INIT_RECORDER') {
     startRecording(msg);
-  } else if (msg.action === 'STOP_RECORDING') {
+  } else if (msg.action === 'STOP_RECORDER') {
     stopRecording();
   }
 });
 
-async function startRecording({ targetTabId, apiKey, sourceLang, targetLang }) {
-  if (isRecording) stopRecording();
+async function startRecording(data) {
+  if (isProcessing) return;
+  config = data;
+  isProcessing = true;
 
   try {
-    // 1. Get Stream ID
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId });
-
-    // 2. Get Media Stream
+    // 1. Get the stream using the ID provided by background.js
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         mandatory: {
           chromeMediaSource: 'tab',
-          chromeMediaSourceId: streamId
+          chromeMediaSourceId: data.streamId
         }
-      }
+      },
+      video: false
     });
 
-    // 3. Audio Context Hack (CRITICAL: Routes audio to speakers so user can hear it)
-    audioContext = new AudioContext();
-    const source = audioContext.createMediaStreamSource(mediaStream);
-    source.connect(audioContext.destination);
+    // 2. Audio Context Hack (CRITICAL)
+    // Connecting the stream to destination ensures the user still hears the audio.
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaStreamSource(mediaStream);
+    source.connect(audioCtx.destination);
 
-    // 4. Setup Recorder
+    // 3. Setup MediaRecorder
+    // 15 seconds chunking to balance latency and context
     recorder = new MediaRecorder(mediaStream, {
       mimeType: 'audio/webm;codecs=opus'
     });
 
-    recorder.ondataavailable = (e) => {
+    recorder.ondataavailable = async (e) => {
       if (e.data.size > 0) {
-        processChunk(e.data, apiKey, sourceLang, targetLang);
+        const blob = e.data;
+        await processAudioChunk(blob);
       }
     };
 
-    recorder.start(CHUNK_DURATION_MS);
-    isRecording = true;
-    chrome.runtime.sendMessage({ action: 'STATUS_UPDATE', status: 'Listening...' });
+    // Collect data every 15 seconds
+    recorder.start(15000); 
 
   } catch (err) {
-    console.error(err);
-    chrome.runtime.sendMessage({ action: 'UI_ERROR', error: 'Capture failed: ' + err.message });
+    chrome.runtime.sendMessage({ action: 'ERROR', error: 'Capture Error: ' + err.message });
+    stopRecording();
   }
 }
 
 function stopRecording() {
-  isRecording = false;
-  if (recorder && recorder.state !== 'inactive') recorder.stop();
-  if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-  if (audioContext) audioContext.close();
-  
-  chrome.runtime.sendMessage({ action: 'STATUS_UPDATE', status: 'Stopped' });
+  isProcessing = false;
+  if (recorder && recorder.state !== 'inactive') {
+    recorder.stop();
+  }
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(t => t.stop());
+  }
+  if (audioCtx) {
+    audioCtx.close();
+  }
 }
 
-async function processChunk(blob, apiKey, sourceLang, targetLang) {
-  if (!isRecording) return; // Ignore chunks after stop
+async function processAudioChunk(blob) {
+  if (!isProcessing) return;
 
   try {
     const base64Data = await blobToBase64(blob);
 
-    // Build Prompt
-    const src = sourceLang === 'Auto-detect' ? "Detect the language." : `Source language: ${sourceLang}.`;
-    const tgt = targetLang === 'None' ? "Transcribe exactly what is said." : `Translate to ${targetLang}. Output ONLY the translated text.`;
-    
+    // Construct Prompt
+    const sourceInstr = config.sourceLang === 'Auto-detect' 
+      ? "Detect the source language automatically." 
+      : `The source language is ${config.sourceLang}.`;
+      
+    const targetInstr = (config.targetLang === 'None' || config.targetLang === config.sourceLang)
+      ? "Transcribe the audio exactly as spoken."
+      : `Translate the spoken content into ${config.targetLang}.`;
+
     const prompt = `
-      Task: Speech-to-text.
-      ${src}
-      ${tgt}
-      Rules:
-      1. Output ONLY the raw text.
-      2. No timestamps, no speaker labels, no introductory phrases.
-      3. If no speech is detected, output nothing.
-      4. Do not describe background noise (e.g. [music], [applause]).
+      Task: Professional Speech-to-Text.
+      ${sourceInstr}
+      ${targetInstr}
+      Instructions:
+      1. Output ONLY the raw transcript/translation.
+      2. Do NOT include timestamps, speaker labels, or descriptions like [music].
+      3. If there is no speech, return an empty string.
     `;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
-    
+    // Gemini 1.5 Flash Endpoint
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${config.apiKey}`;
+
+    const payload = {
+      contents: [{
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: "audio/webm", data: base64Data } }
+        ]
+      }]
+    };
+
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: prompt },
-            { inline_data: { mime_type: "audio/webm", data: base64Data } }
-          ]
-        }]
-      })
+      body: JSON.stringify(payload)
     });
 
-    const data = await response.json();
-    
-    if (data.error) {
-      throw new Error(data.error.message);
+    const result = await response.json();
+
+    if (result.error) {
+      throw new Error(result.error.message);
     }
 
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
     
     if (text && text.trim().length > 0) {
       chrome.runtime.sendMessage({ action: 'TRANSCRIPT_RECEIVED', text: text.trim() });
     }
 
   } catch (err) {
-    console.error('API Error', err);
-    // Don't spam errors for every chunk, maybe just log or subtle notify
-    if (err.message.includes('API key')) {
+    console.error("API Error", err);
+    // Only notify fatal auth errors to avoid spamming UI on temporary net issues
+    if (err.message && (err.message.includes('API key') || err.message.includes('403'))) {
+      chrome.runtime.sendMessage({ action: 'ERROR', error: 'API Error: ' + err.message });
       stopRecording();
-      chrome.runtime.sendMessage({ action: 'UI_ERROR', error: 'Invalid API Key' });
     }
   }
 }
@@ -130,7 +141,11 @@ async function processChunk(blob, apiKey, sourceLang, targetLang) {
 function blobToBase64(blob) {
   return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+    reader.onloadend = () => {
+      // Remove "data:audio/webm;base64," prefix
+      const base64 = reader.result.split(',')[1];
+      resolve(base64);
+    };
     reader.readAsDataURL(blob);
   });
 }
