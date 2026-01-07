@@ -7,7 +7,7 @@ let currentConfig = {};
 let isProcessing = false;
 let lastTranscript = ""; // Context buffer
 
-// 30 Seconds per chunk
+// 30 Seconds per chunk (approx natural pause length)
 const CHUNK_MS = 30000; 
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -15,21 +15,19 @@ chrome.runtime.onMessage.addListener((msg) => {
     startRecording(msg.streamId, msg.config);
   } 
   else if (msg.action === 'STOP_RECORDER') {
-    // Standard stop
     stopRecording();
   } 
   else if (msg.action === 'FORCE_CHUNK') {
-    // Immediately stop recorder to flush buffer, then stop session
+    // Stop recorder immediately to flush buffer
     if (recorder && recorder.state === 'recording') {
       recorder.stop();
     }
-    isProcessing = false; // Prevent further auto-chunks
+    isProcessing = false; 
   }
   else if (msg.action === 'UPDATE_CONFIG') {
     currentConfig = msg.config;
   }
   else if (msg.action === 'CLEANUP_OFFSCREEN') {
-     // Clean up context when session totally ends
      lastTranscript = "";
      stopRecording();
   }
@@ -54,7 +52,7 @@ async function startRecording(streamId, config) {
 
     audioCtx = new AudioContext();
     const source = audioCtx.createMediaStreamSource(mediaStream);
-    source.connect(audioCtx.destination); // Play audio to speakers
+    source.connect(audioCtx.destination);
 
     recorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm;codecs=opus' });
     
@@ -80,7 +78,7 @@ function stopRecording() {
 }
 
 async function processChunk(blob) {
-  // If tiny blob (silence usually), skip to save API calls
+  // Silence threshold: <10KB is likely silence
   if (blob.size < 10000) return;
 
   chrome.runtime.sendMessage({ action: 'CHUNK_PROCESSED' });
@@ -90,10 +88,10 @@ async function processChunk(blob) {
     const text = await callGemini(base64Data);
     
     if (text) {
-      // Append to context
+      // Append to context buffer
       lastTranscript += " " + text;
-      // Keep only last 500 chars for context to avoid huge prompts
-      if (lastTranscript.length > 500) lastTranscript = lastTranscript.slice(-500);
+      // Keep only last 800 chars for context to avoid huge prompts
+      if (lastTranscript.length > 800) lastTranscript = lastTranscript.slice(-800);
       
       chrome.runtime.sendMessage({ action: 'TRANSCRIPT_RECEIVED', text });
     } else {
@@ -101,14 +99,14 @@ async function processChunk(blob) {
     }
   } catch (err) {
     console.error("API Error:", err);
-    // Categorize errors for UI
     let msg = err.message;
     if (msg.includes("403") || msg.includes("key")) msg = "Invalid API Key (403)";
     else if (msg.includes("429")) msg = "Rate Limit (429) - Waiting...";
     else if (msg.includes("404")) msg = "Model Not Found (404)";
     
     reportError(msg);
-    // If fatal, stop
+    
+    // Stop on fatal auth errors
     if (msg.includes("403") || msg.includes("404")) stopRecording();
   }
 }
@@ -116,22 +114,23 @@ async function processChunk(blob) {
 async function callGemini(base64Audio) {
   const { apiKey, sourceLang, targetLang } = currentConfig;
   
-  // Use JSON Mode to force strict output and reduce hallucinations
-  const prompt = `
-  {
-    "text": "..."
-  }
-  Instructions:
-  1. Transcribe the audio chunk strictly.
-  2. If silence, noise, music, or no clear speech: output {"text": ""}.
-  3. Source Language: ${sourceLang}.
-  4. Target Language: ${targetLang === 'None' ? 'Same as Source' : targetLang}.
-  5. Context (previous sentence end): "...${lastTranscript.replace(/"/g, '')}"
-  6. IMPORTANT: Continue the sentence naturally if needed. Add punctuation.
-  7. DO NOT invent text. DO NOT output "Copyright", "Audio", "Subtitle", or "Thanks".
-  `.trim();
+  // Use v1beta endpoint for better audio support
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  // Robust Plain Text Prompt
+  const prompt = `
+  Transcribe the audio precisely.
+  Previous text to continue: ...${lastTranscript.replace(/\n/g, ' ')}
+
+  Rules:
+  - ONLY output clear, audible speech. If silent, noisy, music-only, or unclear: output NOTHING (empty string).
+  - NEVER hallucinate, invent, repeat, or add words not heard.
+  - Continue sentences naturally from previous context.
+  - Source language: ${sourceLang === 'Auto-detect' ? 'auto-detect' : sourceLang}
+  - ${targetLang === 'None' ? 'Keep original language.' : `Translate to ${targetLang}.`}
+  - Add proper punctuation, capitalization, grammar for natural reading.
+  - Output ONLY the clean text. No extras, labels, or notes.
+  `.trim();
   
   const response = await fetch(url, {
     method: 'POST',
@@ -142,10 +141,7 @@ async function callGemini(base64Audio) {
           { text: prompt },
           { inline_data: { mime_type: "audio/webm", data: base64Audio } }
         ]
-      }],
-      generationConfig: {
-        response_mime_type: "application/json"
-      }
+      }]
     })
   });
 
@@ -155,32 +151,26 @@ async function callGemini(base64Audio) {
   }
 
   const data = await response.json();
-  const rawJson = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  let cleanText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  cleanText = cleanText.trim();
+
+  // Client-side anti-hallucination filter
+  if (cleanText.length < 2) return null;
   
-  if (!rawJson) return null;
+  const lower = cleanText.toLowerCase();
+  const hallucinations = [
+    "subtitles by", "copyright", "all rights reserved", 
+    "thank you for watching", "visit our website", 
+    "audio", "transcribed by", "captioned by",
+    "music", "applause", "inaudible"
+  ];
 
-  try {
-    const parsed = JSON.parse(rawJson);
-    let cleanText = parsed.text ? parsed.text.trim() : "";
+  if (hallucinations.some(h => lower.includes(h))) return null;
 
-    // Client-side hallucination filter
-    if (cleanText.length < 2) return null;
-    
-    const lower = cleanText.toLowerCase();
-    const hallucinations = [
-      "subtitles by", "copyright", "all rights reserved", 
-      "thank you for watching", "visit our website", 
-      "audio", "transcribed by", "captioned by"
-    ];
+  // Filter out "lazy dog" or "quick brown fox" test patterns often hallucinated
+  if (/quick brown fox/i.test(cleanText) || /lazy dog/i.test(cleanText)) return null;
 
-    if (hallucinations.some(h => lower.includes(h))) return null;
-
-    return cleanText;
-
-  } catch (e) {
-    console.log("JSON Parse Error (non-fatal):", e);
-    return null;
-  }
+  return cleanText;
 }
 
 function blobToBase64(blob) {

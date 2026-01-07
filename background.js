@@ -5,7 +5,7 @@ let capturingTabId = null;
 
 // 1. Handle Extension Icon Click
 chrome.action.onClicked.addListener(async (tab) => {
-  // Always attempt to inject UI first (idempotent in content.js)
+  // Inject UI if needed
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -15,15 +15,15 @@ chrome.action.onClicked.addListener(async (tab) => {
     console.log("Injection skipped/restricted:", e.message);
   }
 
-  // Toggle the UI visibility
+  // Toggle UI visibility
   try {
     await chrome.tabs.sendMessage(tab.id, { action: 'TOGGLE_UI' });
   } catch (err) {
-    console.warn("Could not communicate with tab:", err);
+    console.warn("Tab not ready:", err);
   }
 });
 
-// 2. Offscreen Lifecycle
+// 2. Offscreen Management
 async function ensureOffscreen() {
   const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_PATH);
   const existingContexts = await chrome.runtime.getContexts({
@@ -42,7 +42,7 @@ async function ensureOffscreen() {
 
 async function closeOffscreen() {
   if (capturingTabId) {
-    // Notify offscreen to clean up internal state first
+    // Notify offscreen to stop recording logic
     chrome.runtime.sendMessage({ action: 'CLEANUP_OFFSCREEN' }).catch(() => {});
   }
   await chrome.offscreen.closeDocument().catch(() => {});
@@ -52,7 +52,7 @@ async function closeOffscreen() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (chrome.runtime.lastError) return;
 
-  // --- From Content Script ---
+  // --- From Content Script (UI) ---
   if (msg.action === 'REQUEST_START_CAPTURE') {
     handleStartCapture(sender.tab.id, msg.config);
   } 
@@ -68,7 +68,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const forwardActions = ['TRANSCRIPT_RECEIVED', 'OFFSCREEN_ERROR', 'NO_SPEECH', 'CHUNK_PROCESSED'];
     if (forwardActions.includes(msg.action)) {
       chrome.tabs.sendMessage(capturingTabId, msg).catch((err) => {
-        // If tab closed, kill capture
+        // If tab is closed, clean up
         if (err.message.includes("closed")) handleStopCapture();
       });
     }
@@ -78,7 +78,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // 4. Capture Logic
 async function handleStartCapture(tabId, config) {
   try {
-    // If we were capturing another tab, stop it.
     if (capturingTabId && capturingTabId !== tabId) {
       await handleStopCapture();
     }
@@ -89,8 +88,7 @@ async function handleStartCapture(tabId, config) {
     // Get Stream ID
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
 
-    // Initialize Recorder
-    // Short delay to ensure offscreen is listening
+    // Initialize Recorder (delay slightly for offscreen readiness)
     setTimeout(() => {
         chrome.runtime.sendMessage({
           action: 'INIT_RECORDER',
@@ -99,7 +97,6 @@ async function handleStartCapture(tabId, config) {
         }).catch(e => console.error("Init failed:", e));
     }, 100);
 
-    // Update UI
     chrome.tabs.sendMessage(tabId, { action: 'CAPTURE_STARTED' });
 
   } catch (err) {
@@ -113,17 +110,16 @@ async function handleStartCapture(tabId, config) {
 async function handleStopCapture() {
   if (!capturingTabId) return;
   
-  // 1. Tell offscreen to process the final chunk immediately
+  // 1. Tell offscreen to process the remaining chunk immediately
   chrome.runtime.sendMessage({ action: 'FORCE_CHUNK' }).catch(() => {});
   
   // 2. Notify UI
   chrome.tabs.sendMessage(capturingTabId, { action: 'CAPTURE_STOPPED' }).catch(() => {});
   
-  const oldTabId = capturingTabId;
   capturingTabId = null;
 
-  // 3. Wait a few seconds for the final API call to finish, then kill offscreen
+  // 3. Wait a few seconds for the final network request to finish, then close offscreen
   setTimeout(() => {
     closeOffscreen();
-  }, 4000); // 4 seconds should be enough for Gemini to return the last sentence
+  }, 4000); 
 }

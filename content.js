@@ -47,7 +47,7 @@
     } 
     else if (msg.action === 'OFFSCREEN_ERROR') {
       setStatus(msg.error, 'error');
-      // If auth/stream error, force stop state in UI
+      // If fatal error, force stop UI state
       if (msg.error.includes("Key") || msg.error.includes("Stream") || msg.error.includes("403") || msg.error.includes("404")) {
         setCapturingState(false);
       }
@@ -68,12 +68,11 @@
     const container = ui.container;
     if (container.style.display === 'none') {
       container.style.display = 'flex';
-      // Do not auto-start; let user click start
       if (!isCapturing) setStatus("Ready to Start");
     } else {
       container.style.display = 'none';
-      // Optional: Auto-stop on hide? 
-      // Current logic: Keep running in background even if hidden, unless user clicks Stop.
+      // If hidden, you can decide to stop capture or keep running.
+      // Currently keeps running (like Picture-in-Picture logic).
     }
   }
 
@@ -112,7 +111,7 @@
         color: white; padding: 8px; border-radius: 6px; font-size: 13px; outline: none;
       }
 
-      /* Control Buttons */
+      /* Buttons */
       .action-row { display: flex; gap: 10px; margin-top: 10px; }
       .act-btn {
         flex: 1; border: none; padding: 10px; border-radius: 6px; cursor: pointer;
@@ -214,20 +213,17 @@
       txt: box.querySelector('#btn-txt')
     };
 
-    // Populate Languages
     LANGUAGES.forEach(l => {
       ui.source.add(new Option(l, l));
       ui.target.add(new Option(l, l));
     });
 
-    // Load Saved State
     chrome.storage.sync.get(['apiKey', 'sourceLang', 'targetLang'], (data) => {
       if (data.apiKey) ui.key.value = data.apiKey;
       if (data.sourceLang) ui.source.value = data.sourceLang;
       if (data.targetLang) ui.target.value = data.targetLang;
     });
 
-    // Event Listeners
     const saveConfig = () => {
       const config = {
         apiKey: ui.key.value.trim(),
@@ -262,14 +258,13 @@
 
     ui.close.onclick = () => {
       ui.container.style.display = 'none';
-      // We do not auto-stop on close to allow background recording
     };
     
     ui.settingsToggle.onclick = () => {
       ui.settingsPanel.style.display = ui.settingsPanel.style.display === 'none' ? 'block' : 'none';
     };
 
-    // --- Drag Logic ---
+    // Drag Logic
     let isDragging = false, startX, startY, initLeft, initBottom;
     ui.header.onmousedown = (e) => {
       isDragging = true;
@@ -296,7 +291,7 @@
       document.removeEventListener('mouseup', onMouseUp);
     };
 
-    // --- Export Actions ---
+    // Actions
     ui.copy.onclick = (e) => {
       if (fullTranscript.length === 0) return;
       navigator.clipboard.writeText(fullTranscript.join('\n\n')).then(() => {
@@ -328,7 +323,6 @@
       ui.stopBtn.textContent = "Stop Capture";
       ui.dot.className = active ? 'dot active' : 'dot';
       
-      // Lock settings while capturing
       ui.key.disabled = active;
       ui.source.disabled = active;
       ui.target.disabled = active;
