@@ -1,24 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Gemini Live Tab Translator",
-  "version": "1.0.0",
-  "description": "Real-time AI transcription and translation for any tab using Gemini.",
-  "permissions": [
-    "activeTab",
-    "tabCapture",
-    "scripting",
-    "storage",
-    "offscreen"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
-  "background": {
-    "service_worker": "background.js"
-  },
+  "version": "1.0",
+  "description": "Real-time tab audio transcription and translation using Gemini API",
   "action": {
     "default_popup": "popup.html",
     "default_title": "Gemini Translator"
+  },
+  "background": {
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
@@ -27,15 +17,20 @@
       "run_at": "document_end"
     }
   ],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabCapture",
+    "offscreen",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "web_accessible_resources": [
     {
       "resources": ["offscreen.html"],
       "matches": ["<all_urls>"]
     }
-  ],
-  "icons": {
-    "16": "icon16.png",
-    "48": "icon48.png",
-    "128": "icon128.png"
-  }
+  ]
 }

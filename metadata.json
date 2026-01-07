@@ -1,6 +1,6 @@
 {
   "name": "Gemini Live Tab Translator",
-  "description": "Captures tab audio, transcribes and translates it in real-time using Gemini 1.5 Flash.",
+  "description": "Chrome Extension for real-time tab transcription using Gemini Flash.",
   "requestFramePermissions": [
     "microphone"
   ]

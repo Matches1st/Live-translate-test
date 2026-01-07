@@ -2,79 +2,52 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Gemini Translator</title>
-  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { width: 350px; }
+    body { width: 320px; font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; padding: 16px; margin: 0; }
+    h1 { font-size: 16px; margin: 0 0 16px 0; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
+    .logo { background: linear-gradient(135deg, #3b82f6, #8b5cf6); width: 20px; height: 20px; border-radius: 4px; display: inline-block; }
+    
+    label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 4px; margin-top: 12px; }
+    input, select { width: 100%; box-sizing: border-box; background: #1e293b; border: 1px solid #334155; color: white; padding: 8px; border-radius: 6px; font-size: 13px; outline: none; }
+    input:focus, select:focus { border-color: #38bdf8; }
+    
+    .btn-group { display: flex; gap: 8px; margin-top: 16px; }
+    button { flex: 1; padding: 10px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; color: white; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #startBtn { background: #2563eb; }
+    #startBtn:hover:not(:disabled) { background: #1d4ed8; }
+    #stopBtn { background: #dc2626; }
+    #stopBtn:hover:not(:disabled) { background: #b91c1c; }
+
+    #status { margin-top: 12px; font-size: 12px; text-align: center; height: 16px; color: #94a3b8; }
+    .error { color: #f87171 !important; }
+    
+    .link { font-size: 11px; color: #60a5fa; text-decoration: none; display: block; margin-top: 4px; text-align: right; }
   </style>
 </head>
-<body class="bg-slate-900 text-slate-100 p-4 font-sans">
-  
-  <div class="mb-4 flex items-center gap-2">
-    <div class="w-8 h-8 rounded bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center font-bold text-white">G</div>
-    <h1 class="text-lg font-bold">Gemini Live Translator</h1>
+<body>
+  <h1><span class="logo"></span> Gemini Live Translator</h1>
+
+  <label>API Key</label>
+  <input type="password" id="apiKey" placeholder="Paste Gemini API Key">
+  <a href="https://aistudio.google.com/app/apikey" target="_blank" class="link">Get Free Key &rarr;</a>
+
+  <label>Source Language</label>
+  <select id="sourceLang">
+    <option value="Auto-detect">✨ Auto-detect</option>
+  </select>
+
+  <label>Target Language</label>
+  <select id="targetLang">
+    <option value="None">None (Transcribe Only)</option>
+  </select>
+
+  <div class="btn-group">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
   </div>
 
-  <!-- API Key Section -->
-  <div class="mb-4">
-    <label class="block text-xs text-slate-400 mb-1">Gemini API Key</label>
-    <input type="password" id="apiKey" placeholder="Paste your API key here" 
-      class="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:border-blue-500 focus:outline-none transition-colors">
-    <a href="https://aistudio.google.com/app/apikey" target="_blank" class="text-xs text-blue-400 hover:text-blue-300 mt-1 inline-block">Get free key ›</a>
-  </div>
-
-  <!-- Language Settings -->
-  <div class="grid grid-cols-2 gap-3 mb-4">
-    <div>
-      <label class="block text-xs text-slate-400 mb-1">Source Language</label>
-      <select id="sourceLang" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-2 text-sm focus:border-blue-500 focus:outline-none">
-        <option value="Auto-detect">Auto-detect</option>
-        <option value="English">English</option>
-        <option value="Spanish">Spanish</option>
-        <option value="French">French</option>
-        <option value="German">German</option>
-        <option value="Chinese">Chinese</option>
-        <option value="Japanese">Japanese</option>
-        <option value="Korean">Korean</option>
-        <option value="Russian">Russian</option>
-        <option value="Portuguese">Portuguese</option>
-        <option value="Italian">Italian</option>
-        <option value="Arabic">Arabic</option>
-        <option value="Hindi">Hindi</option>
-        <!-- Add more as needed, kept short for UI cleanliness -->
-      </select>
-    </div>
-    <div>
-      <label class="block text-xs text-slate-400 mb-1">Target Language</label>
-      <select id="targetLang" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-2 text-sm focus:border-blue-500 focus:outline-none">
-        <option value="None">None (Transcribe)</option>
-        <option value="English">English</option>
-        <option value="Spanish">Spanish</option>
-        <option value="French">French</option>
-        <option value="German">German</option>
-        <option value="Chinese">Chinese</option>
-        <option value="Japanese">Japanese</option>
-        <option value="Korean">Korean</option>
-        <option value="Russian">Russian</option>
-        <option value="Portuguese">Portuguese</option>
-        <option value="Italian">Italian</option>
-        <option value="Arabic">Arabic</option>
-        <option value="Hindi">Hindi</option>
-      </select>
-    </div>
-  </div>
-
-  <!-- Controls -->
-  <div class="flex gap-2">
-    <button id="startBtn" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2 rounded transition-colors disabled:opacity-50">
-      Start Listening
-    </button>
-    <button id="stopBtn" class="flex-1 bg-red-600 hover:bg-red-500 text-white font-semibold py-2 rounded transition-colors disabled:opacity-50" disabled>
-      Stop
-    </button>
-  </div>
-
-  <div id="status" class="mt-3 text-center text-xs text-slate-400 h-4"></div>
+  <div id="status">Ready</div>
 
   <script src="popup.js"></script>
 </body>
