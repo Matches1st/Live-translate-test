@@ -5,19 +5,33 @@ let audioCtx = null;
 let mediaStream = null;
 let currentConfig = {};
 let isProcessing = false;
+let lastTranscript = ""; // Context buffer
 
-// 15 seconds chunking
-const CHUNK_MS = 15000; 
-// 20KB threshold to prevent empty audio calls
-const MIN_BLOB_SIZE = 20000; 
+// 30 Seconds per chunk
+const CHUNK_MS = 30000; 
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'INIT_RECORDER') {
     startRecording(msg.streamId, msg.config);
-  } else if (msg.action === 'STOP_RECORDER') {
+  } 
+  else if (msg.action === 'STOP_RECORDER') {
+    // Standard stop
     stopRecording();
-  } else if (msg.action === 'UPDATE_CONFIG') {
+  } 
+  else if (msg.action === 'FORCE_CHUNK') {
+    // Immediately stop recorder to flush buffer, then stop session
+    if (recorder && recorder.state === 'recording') {
+      recorder.stop();
+    }
+    isProcessing = false; // Prevent further auto-chunks
+  }
+  else if (msg.action === 'UPDATE_CONFIG') {
     currentConfig = msg.config;
+  }
+  else if (msg.action === 'CLEANUP_OFFSCREEN') {
+     // Clean up context when session totally ends
+     lastTranscript = "";
+     stopRecording();
   }
 });
 
@@ -25,9 +39,9 @@ async function startRecording(streamId, config) {
   if (isProcessing) return;
   currentConfig = config;
   isProcessing = true;
+  lastTranscript = "";
 
   try {
-    // 1. Get Stream
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         mandatory: {
@@ -38,12 +52,10 @@ async function startRecording(streamId, config) {
       video: false
     });
 
-    // 2. Audio Routing (Preserve Tab Audio)
     audioCtx = new AudioContext();
     const source = audioCtx.createMediaStreamSource(mediaStream);
-    source.connect(audioCtx.destination);
+    source.connect(audioCtx.destination); // Play audio to speakers
 
-    // 3. Recorder
     recorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm;codecs=opus' });
     
     recorder.ondataavailable = async (e) => {
@@ -52,7 +64,6 @@ async function startRecording(streamId, config) {
       }
     };
 
-    // Start chunking
     recorder.start(CHUNK_MS);
 
   } catch (err) {
@@ -69,15 +80,9 @@ function stopRecording() {
 }
 
 async function processChunk(blob) {
-  if (!isProcessing) return;
-  
-  // Silence Check (Save Quota)
-  if (blob.size < MIN_BLOB_SIZE) {
-    chrome.runtime.sendMessage({ action: 'NO_SPEECH' });
-    return;
-  }
+  // If tiny blob (silence usually), skip to save API calls
+  if (blob.size < 10000) return;
 
-  // Notify Background we are processing
   chrome.runtime.sendMessage({ action: 'CHUNK_PROCESSED' });
 
   try {
@@ -85,48 +90,47 @@ async function processChunk(blob) {
     const text = await callGemini(base64Data);
     
     if (text) {
+      // Append to context
+      lastTranscript += " " + text;
+      // Keep only last 500 chars for context to avoid huge prompts
+      if (lastTranscript.length > 500) lastTranscript = lastTranscript.slice(-500);
+      
       chrome.runtime.sendMessage({ action: 'TRANSCRIPT_RECEIVED', text });
     } else {
       chrome.runtime.sendMessage({ action: 'NO_SPEECH' });
     }
   } catch (err) {
-    console.error("Gemini API Error:", err);
-    // Categorize Errors for User
+    console.error("API Error:", err);
+    // Categorize errors for UI
     let msg = err.message;
-    if (msg.includes("403") || msg.includes("key")) {
-       msg = "Invalid API Key or Permissions (403)";
-    } else if (msg.includes("429")) {
-       msg = "API Rate Limit Exceeded (429) - Waiting...";
-    } else if (msg.includes("404")) {
-       msg = "Model Not Found (404) - Check API Support";
-    } else if (msg.includes("400")) {
-       msg = "Bad Request (400) - Audio Format/Param";
-    }
+    if (msg.includes("403") || msg.includes("key")) msg = "Invalid API Key (403)";
+    else if (msg.includes("429")) msg = "Rate Limit (429) - Waiting...";
+    else if (msg.includes("404")) msg = "Model Not Found (404)";
     
-    // If it's a hard error, stop. If rate limit, maybe keep going (UI decides)
-    if (msg.includes("403") || msg.includes("404")) {
-        reportError(msg);
-        stopRecording();
-    } else {
-        reportError(msg);
-    }
+    reportError(msg);
+    // If fatal, stop
+    if (msg.includes("403") || msg.includes("404")) stopRecording();
   }
 }
 
 async function callGemini(base64Audio) {
   const { apiKey, sourceLang, targetLang } = currentConfig;
   
-  const instruction = `
-You are an expert transcriber.
-- Task: Transcribe the audio chunk accurately.
-- Source Language: ${sourceLang === 'Auto-detect' ? 'Detect automatically' : sourceLang}.
-- Target Language: ${targetLang === 'None' ? 'Same as source (transcription only)' : targetLang}.
-- Output Requirement: Return ONLY the raw transcript text.
-- Formatting: Ensure proper punctuation, capitalization, and grammar. Clean up stuttering.
-- Silence/Noise: If no clear speech is heard, return an empty string.
+  // Use JSON Mode to force strict output and reduce hallucinations
+  const prompt = `
+  {
+    "text": "..."
+  }
+  Instructions:
+  1. Transcribe the audio chunk strictly.
+  2. If silence, noise, music, or no clear speech: output {"text": ""}.
+  3. Source Language: ${sourceLang}.
+  4. Target Language: ${targetLang === 'None' ? 'Same as Source' : targetLang}.
+  5. Context (previous sentence end): "...${lastTranscript.replace(/"/g, '')}"
+  6. IMPORTANT: Continue the sentence naturally if needed. Add punctuation.
+  7. DO NOT invent text. DO NOT output "Copyright", "Audio", "Subtitle", or "Thanks".
   `.trim();
 
-  // Endpoint: Using gemini-2.5-flash as requested
   const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
   
   const response = await fetch(url, {
@@ -135,26 +139,48 @@ You are an expert transcriber.
     body: JSON.stringify({
       contents: [{
         parts: [
-          { text: instruction },
+          { text: prompt },
           { inline_data: { mime_type: "audio/webm", data: base64Audio } }
         ]
-      }]
+      }],
+      generationConfig: {
+        response_mime_type: "application/json"
+      }
     })
   });
 
   if (!response.ok) {
-    let errText = await response.text();
-    try {
-        const errJson = JSON.parse(errText);
-        errText = errJson.error?.message || errText;
-    } catch(e) {}
-    throw new Error(`HTTP ${response.status}: ${errText}`);
+    const errText = await response.text();
+    throw new Error(`HTTP ${response.status} ${errText}`);
   }
 
   const data = await response.json();
+  const rawJson = data.candidates?.[0]?.content?.parts?.[0]?.text;
   
-  // Extract text
-  return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  if (!rawJson) return null;
+
+  try {
+    const parsed = JSON.parse(rawJson);
+    let cleanText = parsed.text ? parsed.text.trim() : "";
+
+    // Client-side hallucination filter
+    if (cleanText.length < 2) return null;
+    
+    const lower = cleanText.toLowerCase();
+    const hallucinations = [
+      "subtitles by", "copyright", "all rights reserved", 
+      "thank you for watching", "visit our website", 
+      "audio", "transcribed by", "captioned by"
+    ];
+
+    if (hallucinations.some(h => lower.includes(h))) return null;
+
+    return cleanText;
+
+  } catch (e) {
+    console.log("JSON Parse Error (non-fatal):", e);
+    return null;
+  }
 }
 
 function blobToBase64(blob) {

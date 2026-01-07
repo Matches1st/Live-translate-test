@@ -2,7 +2,7 @@
 // Persistent Overlay UI for Gemini Live Translator
 
 (function() {
-  // CRITICAL: Prevent duplicate injection which causes "Identifier already declared" errors
+  // GUARD: Prevent duplicate injection
   if (window.hasGeminiTranslateOverlay) return;
   window.hasGeminiTranslateOverlay = true;
 
@@ -23,70 +23,57 @@
   let silenceCount = 0;
 
   // --- Message Listener ---
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg) => {
     if (msg.action === 'TOGGLE_UI') {
       toggleOverlay();
-    } else if (msg.action === 'TRANSCRIPT_RECEIVED') {
+    } 
+    else if (msg.action === 'TRANSCRIPT_RECEIVED') {
       appendTranscript(msg.text);
-      setStatus("Listening...", 'active');
+      setStatus("Capturing...", 'active');
       silenceCount = 0;
-    } else if (msg.action === 'CHUNK_PROCESSED') {
-      // Just a heartbeat from offscreen
-      if (ui.status && ui.status.textContent !== "Listening...") {
-        setStatus("Listening...", 'active');
+    } 
+    else if (msg.action === 'CHUNK_PROCESSED') {
+      if (isCapturing && ui.status && ui.status.textContent !== "Capturing...") {
+        setStatus("Capturing...", 'active');
       }
-    } else if (msg.action === 'NO_SPEECH') {
-      silenceCount++;
-      if (silenceCount > 1) {
-        setStatus("Listening... (no clear speech yet - try louder source)", 'warning');
-      } else {
-        setStatus("Listening...", 'active');
+    } 
+    else if (msg.action === 'NO_SPEECH') {
+      if (isCapturing) {
+        silenceCount++;
+        if (silenceCount > 1) {
+          setStatus("Capturing... (No speech detected)", 'warning');
+        }
       }
-    } else if (msg.action === 'OFFSCREEN_ERROR') {
+    } 
+    else if (msg.action === 'OFFSCREEN_ERROR') {
       setStatus(msg.error, 'error');
-      // Fatal errors
+      // If auth/stream error, force stop state in UI
       if (msg.error.includes("Key") || msg.error.includes("Stream") || msg.error.includes("403") || msg.error.includes("404")) {
         setCapturingState(false);
       }
-    } else if (msg.action === 'ERROR') {
-      setStatus(msg.error, 'error');
-      setCapturingState(false);
-    } else if (msg.action === 'CAPTURE_STARTED') {
+    } 
+    else if (msg.action === 'CAPTURE_STARTED') {
       setCapturingState(true);
-    } else if (msg.action === 'CAPTURE_STOPPED') {
+    } 
+    else if (msg.action === 'CAPTURE_STOPPED') {
       setCapturingState(false);
-      appendTranscript("--- Session Ended ---", true);
+      setStatus("Paused / Ready");
     }
-    
-    // sendResponse not used but good practice to avoid connection errors if async
-    return false;
   });
 
   function toggleOverlay() {
     if (!overlayHost) {
       createOverlay();
-      // Auto-start check
-      chrome.storage.sync.get(['apiKey'], (res) => {
-        if (res.apiKey) startCapture();
-        else {
-          ui.settingsPanel.open = true;
-          setStatus("Enter API Key to start", 'warning');
-        }
-      });
-      return;
     }
-    
     const container = ui.container;
     if (container.style.display === 'none') {
       container.style.display = 'flex';
-      chrome.storage.sync.get(['apiKey'], (res) => {
-        if (res.apiKey) startCapture();
-      });
+      // Do not auto-start; let user click start
+      if (!isCapturing) setStatus("Ready to Start");
     } else {
       container.style.display = 'none';
-      if (isCapturing) {
-        chrome.runtime.sendMessage({ action: 'REQUEST_STOP_CAPTURE' });
-      }
+      // Optional: Auto-stop on hide? 
+      // Current logic: Keep running in background even if hidden, unless user clicks Stop.
     }
   }
 
@@ -101,28 +88,15 @@
     const style = document.createElement('style');
     style.textContent = `
       .box {
-        width: 380px;
-        max-height: 600px;
-        background: rgba(15, 23, 42, 0.98);
-        border: 1px solid #334155;
-        border-radius: 12px;
-        color: #f8fafc;
-        display: flex;
-        flex-direction: column;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-        font-size: 14px;
-        backdrop-filter: blur(10px);
+        width: 380px; max-height: 600px; background: rgba(15, 23, 42, 0.98);
+        border: 1px solid #334155; border-radius: 12px; color: #f8fafc;
+        display: flex; flex-direction: column; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        font-size: 14px; backdrop-filter: blur(10px);
       }
       .header {
-        padding: 12px 16px;
-        background: #1e293b;
-        border-bottom: 1px solid #334155;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        border-radius: 12px 12px 0 0;
-        cursor: grab;
-        user-select: none;
+        padding: 12px 16px; background: #1e293b; border-bottom: 1px solid #334155;
+        display: flex; justify-content: space-between; align-items: center;
+        border-radius: 12px 12px 0 0; cursor: grab; user-select: none;
       }
       .header:active { cursor: grabbing; }
       .title { font-weight: 600; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
@@ -130,21 +104,26 @@
       .dot.active { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
       .dot.error { background: #ef4444; }
 
-      .controls button {
-        background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 16px; padding: 4px 8px; border-radius: 4px;
-      }
-      .controls button:hover { background: #334155; color: white; }
-
-      .settings { background: #0f172a; border-bottom: 1px solid #334155; padding: 12px; }
+      .settings { background: #0f172a; padding: 12px; border-bottom: 1px solid #334155; }
       .row { margin-bottom: 10px; }
       label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 4px; text-transform: uppercase; }
       input, select {
         width: 100%; box-sizing: border-box; background: #1e293b; border: 1px solid #475569;
         color: white; padding: 8px; border-radius: 6px; font-size: 13px; outline: none;
       }
-      input:focus, select:focus { border-color: #38bdf8; }
 
-      .status { padding: 8px 12px; font-size: 12px; color: #94a3b8; background: #1e293b; border-bottom: 1px solid #334155; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      /* Control Buttons */
+      .action-row { display: flex; gap: 10px; margin-top: 10px; }
+      .act-btn {
+        flex: 1; border: none; padding: 10px; border-radius: 6px; cursor: pointer;
+        font-weight: 600; font-size: 13px; color: white; transition: opacity 0.2s;
+      }
+      .act-btn:hover { opacity: 0.9; }
+      .btn-start { background: #22c55e; }
+      .btn-stop { background: #ef4444; }
+      .btn-stop:disabled { background: #94a3b8; cursor: not-allowed; }
+
+      .status { padding: 8px 12px; font-size: 12px; color: #94a3b8; background: #1e293b; border-bottom: 1px solid #334155; text-align: center; }
       .status.active { color: #22c55e; }
       .status.warning { color: #fbbf24; }
       .status.error { color: #ef4444; }
@@ -158,15 +137,14 @@
       @keyframes slideIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; } }
 
       .footer { padding: 10px; border-top: 1px solid #334155; display: flex; gap: 8px; }
-      .btn {
+      .sub-btn {
         flex: 1; background: #334155; border: none; color: #e2e8f0; padding: 8px; border-radius: 6px;
-        cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.2s;
+        cursor: pointer; font-size: 12px; font-weight: 500;
       }
-      .btn:hover { background: #475569; color: white; }
-
-      details > summary { cursor: pointer; outline: none; color: #94a3b8; font-size: 12px; list-style: none; }
-      details > summary:hover { color: #38bdf8; }
-      details[open] > summary { margin-bottom: 8px; color: #38bdf8; }
+      .sub-btn:hover { background: #475569; }
+      
+      button.icon-btn { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 16px; }
+      button.icon-btn:hover { color: white; }
       
       ::-webkit-scrollbar { width: 6px; }
       ::-webkit-scrollbar-track { background: transparent; }
@@ -180,13 +158,12 @@
       <div class="header" id="header">
         <div class="title"><div class="dot" id="dot"></div> Gemini Live</div>
         <div class="controls">
-          <button id="btn-settings" title="Settings">⚙️</button>
-          <button id="btn-close" title="Close">✕</button>
+          <button class="icon-btn" id="btn-settings" title="Toggle Config">⚙️</button>
+          <button class="icon-btn" id="btn-close" title="Close">✕</button>
         </div>
       </div>
       
-      <details class="settings" id="settings-panel">
-        <summary>Configuration</summary>
+      <div class="settings" id="settings-panel">
         <div class="row">
           <label>Gemini API Key</label>
           <input type="password" id="inp-key" placeholder="Paste API Key here...">
@@ -203,14 +180,18 @@
             <option value="None">None (Captions Only)</option>
           </select>
         </div>
-      </details>
+        <div class="action-row">
+           <button class="act-btn btn-start" id="btn-start">Start Capture</button>
+           <button class="act-btn btn-stop" id="btn-stop" disabled>Stop</button>
+        </div>
+      </div>
 
-      <div class="status" id="status">Ready</div>
+      <div class="status" id="status">Ready to Start</div>
       <div class="transcript" id="output"></div>
 
       <div class="footer">
-        <button class="btn" id="btn-copy">Copy All</button>
-        <button class="btn" id="btn-txt">Download TXT</button>
+        <button class="sub-btn" id="btn-copy">Copy All</button>
+        <button class="sub-btn" id="btn-txt">Download TXT</button>
       </div>
     `;
     shadowRoot.appendChild(box);
@@ -223,6 +204,8 @@
       key: box.querySelector('#inp-key'),
       source: box.querySelector('#sel-source'),
       target: box.querySelector('#sel-target'),
+      startBtn: box.querySelector('#btn-start'),
+      stopBtn: box.querySelector('#btn-stop'),
       status: box.querySelector('#status'),
       output: box.querySelector('#output'),
       close: box.querySelector('#btn-close'),
@@ -231,18 +214,21 @@
       txt: box.querySelector('#btn-txt')
     };
 
+    // Populate Languages
     LANGUAGES.forEach(l => {
       ui.source.add(new Option(l, l));
       ui.target.add(new Option(l, l));
     });
 
+    // Load Saved State
     chrome.storage.sync.get(['apiKey', 'sourceLang', 'targetLang'], (data) => {
       if (data.apiKey) ui.key.value = data.apiKey;
       if (data.sourceLang) ui.source.value = data.sourceLang;
       if (data.targetLang) ui.target.value = data.targetLang;
     });
 
-    const updateConfig = () => {
+    // Event Listeners
+    const saveConfig = () => {
       const config = {
         apiKey: ui.key.value.trim(),
         sourceLang: ui.source.value,
@@ -251,23 +237,39 @@
       chrome.storage.sync.set(config);
       if (isCapturing) {
         chrome.runtime.sendMessage({ action: 'UPDATE_CONFIG', config });
-      } else if (config.apiKey && ui.container.style.display !== 'none') {
-        startCapture();
       }
+      return config;
     };
-    ui.key.onchange = updateConfig;
-    ui.source.onchange = updateConfig;
-    ui.target.onchange = updateConfig;
+
+    ui.key.onchange = saveConfig;
+    ui.source.onchange = saveConfig;
+    ui.target.onchange = saveConfig;
+
+    ui.startBtn.onclick = () => {
+      const config = saveConfig();
+      if (!config.apiKey) {
+        setStatus("API Key Required!", 'error');
+        return;
+      }
+      setStatus("Initializing...", 'warning');
+      chrome.runtime.sendMessage({ action: 'REQUEST_START_CAPTURE', config });
+    };
+
+    ui.stopBtn.onclick = () => {
+      chrome.runtime.sendMessage({ action: 'REQUEST_STOP_CAPTURE' });
+      ui.stopBtn.textContent = "Stopping...";
+    };
 
     ui.close.onclick = () => {
       ui.container.style.display = 'none';
-      if (isCapturing) chrome.runtime.sendMessage({ action: 'REQUEST_STOP_CAPTURE' });
+      // We do not auto-stop on close to allow background recording
     };
+    
     ui.settingsToggle.onclick = () => {
-      ui.settingsPanel.open = !ui.settingsPanel.open;
+      ui.settingsPanel.style.display = ui.settingsPanel.style.display === 'none' ? 'block' : 'none';
     };
 
-    // Dragging Logic
+    // --- Drag Logic ---
     let isDragging = false, startX, startY, initLeft, initBottom;
     ui.header.onmousedown = (e) => {
       isDragging = true;
@@ -294,7 +296,7 @@
       document.removeEventListener('mouseup', onMouseUp);
     };
 
-    // Actions
+    // --- Export Actions ---
     ui.copy.onclick = (e) => {
       if (fullTranscript.length === 0) return;
       navigator.clipboard.writeText(fullTranscript.join('\n\n')).then(() => {
@@ -317,32 +319,21 @@
     };
   }
 
-  function startCapture() {
-    const apiKey = ui.key.value.trim();
-    if (!apiKey) return;
-    
-    setStatus("Initializing... (play audio in tab)", 'warning');
-    silenceCount = 0;
-    try {
-      chrome.runtime.sendMessage({
-        action: 'REQUEST_START_CAPTURE',
-        config: { apiKey, sourceLang: ui.source.value, targetLang: ui.target.value }
-      });
-    } catch(e) {
-      console.error(e);
-      setStatus("Extension disconnected. Refresh page.", 'error');
-    }
-  }
-
   function setCapturingState(active) {
     isCapturing = active;
-    if (active) {
-      ui.dot.className = 'dot active';
-      setStatus("Listening... (play clear speech)", 'active');
-    } else {
-      ui.dot.className = 'dot';
-      if (!ui.status.classList.contains('error')) setStatus("Stopped");
+    if (ui.startBtn) {
+      ui.startBtn.style.display = active ? 'none' : 'block';
+      ui.stopBtn.style.display = active ? 'block' : 'none';
+      ui.stopBtn.disabled = !active;
+      ui.stopBtn.textContent = "Stop Capture";
+      ui.dot.className = active ? 'dot active' : 'dot';
+      
+      // Lock settings while capturing
+      ui.key.disabled = active;
+      ui.source.disabled = active;
+      ui.target.disabled = active;
     }
+    if (active) setStatus("Capturing...", 'active');
   }
 
   function setStatus(text, type = '') {
