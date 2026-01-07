@@ -5,23 +5,27 @@ let capturingTabId = null;
 
 // 1. Handle Extension Icon Click
 chrome.action.onClicked.addListener(async (tab) => {
+  // If capturing a different tab, stop it first
   if (capturingTabId && capturingTabId !== tab.id) {
     await stopCapture();
   }
 
-  // Inject UI if needed
+  // Inject UI if needed (Safe injection)
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ['content.js']
     });
   } catch (e) {
-    // Script likely already injected
+    // Script likely already injected or restricted page (e.g., chrome://)
+    console.log("Injection skipped:", e.message);
   }
 
   // Send Toggle Command
+  // We use a small delay or retry logic implicitly by user click, 
+  // but usually executeScript is fast enough.
   chrome.tabs.sendMessage(tab.id, { action: 'TOGGLE_UI' }).catch((err) => {
-    console.error("Could not send message to tab:", err);
+    console.warn("Could not toggle UI (Tab might be loading or restricted):", err);
   });
 });
 
@@ -58,13 +62,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     stopCapture();
   } else if (msg.action === 'UPDATE_CONFIG') {
     chrome.runtime.sendMessage({ action: 'UPDATE_CONFIG', config: msg.config }).catch(() => {});
-  } else if (msg.action === 'DOWNLOAD_PDF') {
-    if (sender.tab) injectPdfGenerator(sender.tab.id, msg.text);
   }
   
   // Messages from Offscreen -> Content Script
   else if (capturingTabId) {
-    // Forward these specific messages to the UI for status updates
     const forwardActions = ['TRANSCRIPT_RECEIVED', 'OFFSCREEN_ERROR', 'NO_SPEECH', 'CHUNK_PROCESSED'];
     if (forwardActions.includes(msg.action)) {
       chrome.tabs.sendMessage(capturingTabId, msg).catch(() => {});
@@ -113,43 +114,4 @@ async function stopCapture() {
   
   // Wait a bit before killing offscreen to allow last chunk processing
   setTimeout(() => closeOffscreen(), 2000);
-}
-
-// 5. PDF Generator Injection
-function injectPdfGenerator(tabId, fullText) {
-  chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    func: async (text) => {
-      try {
-        const { jsPDF } = await import('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
-        const doc = new jsPDF();
-        
-        const pageWidth = doc.internal.pageSize.getWidth();
-        const margin = 15;
-        const maxLineWidth = pageWidth - (margin * 2);
-
-        doc.setFontSize(18);
-        doc.text("Gemini Live Transcript", margin, 20);
-        doc.setFontSize(12);
-
-        const lines = doc.splitTextToSize(text, maxLineWidth);
-        let y = 35;
-
-        lines.forEach(line => {
-          if (y > 280) {
-            doc.addPage();
-            y = 20;
-          }
-          doc.text(line, margin, y);
-          y += 7;
-        });
-
-        doc.save(`transcript_${new Date().toISOString().slice(0,16)}.pdf`);
-      } catch (e) {
-        alert("PDF Generation Error: " + e.message + "\n(Check internet connection)");
-      }
-    },
-    args: [fullText]
-  });
 }

@@ -8,8 +8,8 @@ let isProcessing = false;
 
 // 15 seconds chunking
 const CHUNK_MS = 15000; 
-// 10KB threshold. If blob is smaller, it's silence/quiet noise.
-const MIN_BLOB_SIZE = 10000; 
+// 15KB threshold. If blob is smaller, it's silence/quiet noise.
+const MIN_BLOB_SIZE = 15000; 
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'INIT_RECORDER') {
@@ -71,9 +71,7 @@ function stopRecording() {
 async function processChunk(blob) {
   if (!isProcessing) return;
   
-  console.log(`Processing chunk: ${blob.size} bytes`);
-
-  // Silence Check
+  // Silence Check (Save Quota)
   if (blob.size < MIN_BLOB_SIZE) {
     chrome.runtime.sendMessage({ action: 'NO_SPEECH' });
     return;
@@ -94,10 +92,13 @@ async function processChunk(blob) {
   } catch (err) {
     console.error("Gemini API Error:", err);
     if (err.message.includes("403") || err.message.includes("key")) {
-       reportError("Invalid API Key (Check Settings)");
+       reportError("Invalid API Key or Permissions");
        stopRecording();
     } else if (err.message.includes("429")) {
-       reportError("Rate Limit (Wait a moment)");
+       reportError("API Rate Limit (Waiting...)");
+    } else if (err.message.includes("404")) {
+       reportError("Model Not Found (Check Endpoint)");
+       stopRecording();
     } else {
        reportError("API Error: " + err.message);
     }
@@ -108,17 +109,17 @@ async function callGemini(base64Audio) {
   const { apiKey, sourceLang, targetLang } = currentConfig;
   
   const instruction = `
-You are an expert transcriber and translator.
-- Transcribe the audio accurately.
-- ${sourceLang === 'Auto-detect' ? 'Auto-detect the spoken language.' : `Spoken language is ${sourceLang}.`}
-- ${targetLang === 'None' ? 'Output clean English text only (or detected language).' : `Translate to ${targetLang}.`}
-- Always: Add proper punctuation, capitalization, and grammar. Make it read naturally like written text. Fix any repetition or errors.
-- Output ONLY the clean text. No labels, timestamps, or extras.
-- If no clear speech (silence, noise, music only), output nothing.
+You are an expert transcriber.
+- Task: Transcribe the audio chunk accurately.
+- Source Language: ${sourceLang === 'Auto-detect' ? 'Detect automatically' : sourceLang}.
+- Target Language: ${targetLang === 'None' ? 'Same as source (transcription only)' : targetLang}.
+- Output Requirement: Return ONLY the raw transcript text.
+- Formatting: Ensure proper punctuation, capitalization, and grammar. Clean up stuttering.
+- Silence/Noise: If no clear speech is heard, return an empty string.
   `.trim();
 
-  // Endpoint: Using flash-latest as requested
-  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
+  // Endpoint: Using v1beta as it is most reliable for Audio input on free tier
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
   
   const response = await fetch(url, {
     method: 'POST',
@@ -134,7 +135,11 @@ You are an expert transcriber and translator.
   });
 
   if (!response.ok) {
-    const errText = await response.text();
+    let errText = await response.text();
+    try {
+        const errJson = JSON.parse(errText);
+        errText = errJson.error?.message || errText;
+    } catch(e) {}
     throw new Error(`HTTP ${response.status}: ${errText}`);
   }
 
