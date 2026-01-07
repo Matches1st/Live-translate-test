@@ -2,10 +2,11 @@
 // Persistent Overlay UI for Gemini Live Translator
 
 (function() {
-  // Prevent duplicate injection
-  if (window.geminiTranslatorInjected) return;
-  window.geminiTranslatorInjected = true;
+  // CRITICAL: Prevent duplicate injection which causes "Identifier already declared" errors
+  if (window.hasGeminiTranslateOverlay) return;
+  window.hasGeminiTranslateOverlay = true;
 
+  // Constants
   const LANGUAGES = [
     "English", "Spanish", "French", "German", "Chinese (Simplified)", "Japanese", "Korean", "Russian", "Portuguese", "Italian",
     "Arabic", "Hindi", "Dutch", "Turkish", "Polish", "Swedish", "Danish", "Norwegian", "Finnish", "Greek",
@@ -14,15 +15,15 @@
     "Urdu", "Tamil", "Telugu", "Marathi", "Swahili", "Afrikaans"
   ].sort();
 
+  // State
   let overlayHost = null;
-  let shadowRoot = null;
   let ui = {};
   let fullTranscript = [];
   let isCapturing = false;
   let silenceCount = 0;
 
   // --- Message Listener ---
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === 'TOGGLE_UI') {
       toggleOverlay();
     } else if (msg.action === 'TRANSCRIPT_RECEIVED') {
@@ -30,21 +31,21 @@
       setStatus("Listening...", 'active');
       silenceCount = 0;
     } else if (msg.action === 'CHUNK_PROCESSED') {
-      // Only show "Processing" briefly if we haven't just received text
-      if (ui.status.textContent !== "Listening...") {
+      // Just a heartbeat from offscreen
+      if (ui.status && ui.status.textContent !== "Listening...") {
         setStatus("Listening...", 'active');
       }
     } else if (msg.action === 'NO_SPEECH') {
       silenceCount++;
       if (silenceCount > 1) {
-        setStatus("Listening... (no clear speech detected)", 'warning');
+        setStatus("Listening... (no clear speech yet - try louder source)", 'warning');
       } else {
         setStatus("Listening...", 'active');
       }
     } else if (msg.action === 'OFFSCREEN_ERROR') {
       setStatus(msg.error, 'error');
-      // Fatal errors that should stop capture
-      if (msg.error.includes("Key") || msg.error.includes("Stream") || msg.error.includes("403")) {
+      // Fatal errors
+      if (msg.error.includes("Key") || msg.error.includes("Stream") || msg.error.includes("403") || msg.error.includes("404")) {
         setCapturingState(false);
       }
     } else if (msg.action === 'ERROR') {
@@ -56,11 +57,15 @@
       setCapturingState(false);
       appendTranscript("--- Session Ended ---", true);
     }
+    
+    // sendResponse not used but good practice to avoid connection errors if async
+    return false;
   });
 
   function toggleOverlay() {
     if (!overlayHost) {
       createOverlay();
+      // Auto-start check
       chrome.storage.sync.get(['apiKey'], (res) => {
         if (res.apiKey) startCapture();
         else {
@@ -91,7 +96,7 @@
     overlayHost.style.cssText = 'all: initial; position: fixed; bottom: 20px; right: 20px; z-index: 2147483647; font-family: sans-serif;';
     document.body.appendChild(overlayHost);
 
-    shadowRoot = overlayHost.attachShadow({ mode: 'open' });
+    const shadowRoot = overlayHost.attachShadow({ mode: 'open' });
 
     const style = document.createElement('style');
     style.textContent = `
@@ -262,6 +267,7 @@
       ui.settingsPanel.open = !ui.settingsPanel.open;
     };
 
+    // Dragging Logic
     let isDragging = false, startX, startY, initLeft, initBottom;
     ui.header.onmousedown = (e) => {
       isDragging = true;
@@ -288,6 +294,7 @@
       document.removeEventListener('mouseup', onMouseUp);
     };
 
+    // Actions
     ui.copy.onclick = (e) => {
       if (fullTranscript.length === 0) return;
       navigator.clipboard.writeText(fullTranscript.join('\n\n')).then(() => {
@@ -316,10 +323,15 @@
     
     setStatus("Initializing... (play audio in tab)", 'warning');
     silenceCount = 0;
-    chrome.runtime.sendMessage({
-      action: 'REQUEST_START_CAPTURE',
-      config: { apiKey, sourceLang: ui.source.value, targetLang: ui.target.value }
-    });
+    try {
+      chrome.runtime.sendMessage({
+        action: 'REQUEST_START_CAPTURE',
+        config: { apiKey, sourceLang: ui.source.value, targetLang: ui.target.value }
+      });
+    } catch(e) {
+      console.error(e);
+      setStatus("Extension disconnected. Refresh page.", 'error');
+    }
   }
 
   function setCapturingState(active) {
@@ -334,6 +346,7 @@
   }
 
   function setStatus(text, type = '') {
+    if (!ui.status) return;
     ui.status.textContent = text;
     ui.status.className = `status ${type}`;
     if (type === 'error') ui.dot.className = 'dot error';
@@ -341,6 +354,7 @@
 
   function appendTranscript(text, isSystem = false) {
     if (!isSystem) fullTranscript.push(text);
+    if (!ui.output) return;
     const div = document.createElement('div');
     div.className = isSystem ? 'msg sys' : 'msg';
     div.textContent = text;

@@ -10,30 +10,30 @@ chrome.action.onClicked.addListener(async (tab) => {
     await stopCapture();
   }
 
-  // Inject UI if needed (Safe injection)
+  // Inject UI. We attempt injection every time, but content.js has a guard 
+  // to prevent re-execution/duplicate variables.
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ['content.js']
     });
   } catch (e) {
-    // Script likely already injected or restricted page (e.g., chrome://)
-    console.log("Injection skipped:", e.message);
+    console.log("Injection skipped or restricted page:", e.message);
   }
 
   // Send Toggle Command
-  // We use a small delay or retry logic implicitly by user click, 
-  // but usually executeScript is fast enough.
-  chrome.tabs.sendMessage(tab.id, { action: 'TOGGLE_UI' }).catch((err) => {
-    console.warn("Could not toggle UI (Tab might be loading or restricted):", err);
-  });
+  try {
+    await chrome.tabs.sendMessage(tab.id, { action: 'TOGGLE_UI' });
+  } catch (err) {
+    console.warn("Could not toggle UI (tab loading or restricted):", err);
+  }
 });
 
 // 2. Offscreen Document Management
 async function ensureOffscreen() {
   const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_PATH);
   
-  // Check existence using full URL to avoid duplicates
+  // Check existence using full URL
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT'],
     documentUrls: [offscreenUrl]
@@ -55,6 +55,12 @@ async function closeOffscreen() {
 
 // 3. Message Routing
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Check if sender tab is still valid
+  if (chrome.runtime.lastError) {
+    console.warn("Runtime error:", chrome.runtime.lastError);
+    return;
+  }
+
   // Commands from Content Script
   if (msg.action === 'REQUEST_START_CAPTURE') {
     handleStartCapture(sender.tab.id, msg.config);
@@ -68,7 +74,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   else if (capturingTabId) {
     const forwardActions = ['TRANSCRIPT_RECEIVED', 'OFFSCREEN_ERROR', 'NO_SPEECH', 'CHUNK_PROCESSED'];
     if (forwardActions.includes(msg.action)) {
-      chrome.tabs.sendMessage(capturingTabId, msg).catch(() => {});
+      chrome.tabs.sendMessage(capturingTabId, msg).catch((err) => {
+        // Tab might have been closed
+        if (err.message.includes("closed")) {
+          stopCapture();
+        }
+      });
     }
   }
 });
@@ -79,22 +90,25 @@ async function handleStartCapture(tabId, config) {
     capturingTabId = tabId;
     await ensureOffscreen();
     
-    // Get Stream ID (must be done in background)
+    // Get Stream ID
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
 
     // Initialize Recorder in Offscreen
-    chrome.runtime.sendMessage({
-      action: 'INIT_RECORDER',
-      streamId: streamId,
-      config: config
-    });
+    // Wait a brief moment to ensure offscreen is ready to receive
+    setTimeout(() => {
+        chrome.runtime.sendMessage({
+          action: 'INIT_RECORDER',
+          streamId: streamId,
+          config: config
+        }).catch(e => console.error("Failed to init recorder:", e));
+    }, 100);
 
     // Notify Content Script
     chrome.tabs.sendMessage(tabId, { action: 'CAPTURE_STARTED' });
 
   } catch (err) {
     console.error("Capture failed:", err);
-    chrome.tabs.sendMessage(tabId, { action: 'ERROR', error: "Capture failed: " + err.message });
+    chrome.tabs.sendMessage(tabId, { action: 'ERROR', error: "Capture failed: " + err.message }).catch(() => {});
     closeOffscreen();
     capturingTabId = null;
   }

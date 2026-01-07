@@ -8,8 +8,8 @@ let isProcessing = false;
 
 // 15 seconds chunking
 const CHUNK_MS = 15000; 
-// 15KB threshold. If blob is smaller, it's silence/quiet noise.
-const MIN_BLOB_SIZE = 15000; 
+// 20KB threshold to prevent empty audio calls
+const MIN_BLOB_SIZE = 20000; 
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === 'INIT_RECORDER') {
@@ -91,16 +91,24 @@ async function processChunk(blob) {
     }
   } catch (err) {
     console.error("Gemini API Error:", err);
-    if (err.message.includes("403") || err.message.includes("key")) {
-       reportError("Invalid API Key or Permissions");
-       stopRecording();
-    } else if (err.message.includes("429")) {
-       reportError("API Rate Limit (Waiting...)");
-    } else if (err.message.includes("404")) {
-       reportError("Model Not Found (Check Endpoint)");
-       stopRecording();
+    // Categorize Errors for User
+    let msg = err.message;
+    if (msg.includes("403") || msg.includes("key")) {
+       msg = "Invalid API Key or Permissions (403)";
+    } else if (msg.includes("429")) {
+       msg = "API Rate Limit Exceeded (429) - Waiting...";
+    } else if (msg.includes("404")) {
+       msg = "Model Not Found (404) - Check API Support";
+    } else if (msg.includes("400")) {
+       msg = "Bad Request (400) - Audio Format/Param";
+    }
+    
+    // If it's a hard error, stop. If rate limit, maybe keep going (UI decides)
+    if (msg.includes("403") || msg.includes("404")) {
+        reportError(msg);
+        stopRecording();
     } else {
-       reportError("API Error: " + err.message);
+        reportError(msg);
     }
   }
 }
@@ -118,8 +126,8 @@ You are an expert transcriber.
 - Silence/Noise: If no clear speech is heard, return an empty string.
   `.trim();
 
-  // Endpoint: Using v1beta as it is most reliable for Audio input on free tier
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  // Endpoint: Using gemini-2.5-flash as requested
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
   
   const response = await fetch(url, {
     method: 'POST',
